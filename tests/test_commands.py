@@ -332,6 +332,24 @@ class CommandTests(unittest.TestCase):
             else:
                 self.fail('Invalid JSON input was accepted')
 
+    def test_unhashable_source_kind_is_one_structured_error_without_provider_call(self):
+        with tempfile.TemporaryDirectory(prefix='命令 invalid kind ') as folder:
+            scenario = Scenario(folder)
+            request = scenario.request('paper.json', {
+                'schema_version': 1,
+                'source': {'kind': [], 'value': '10.1000/invalid-kind'},
+                'metadata': {'title': 'Invalid kind'},
+            })
+            result, data = self.invoke(scenario, 'papers', 'add', '--input', str(request))
+            self.assertEqual(result.returncode, 2)
+            self.assertEqual(data, {'ok': False, 'error': {
+                'code': 'SOURCE_INVALID',
+                'message': 'source requires a supported kind and string value',
+            }})
+            self.assertNotIn('Traceback', result.stdout + result.stderr)
+            self.assertEqual(result.stderr, '')
+            self.assertEqual(scenario.provider()['calls'], [])
+
     def test_existing_m1_commands_remain_available(self):
         with tempfile.TemporaryDirectory(prefix='配置 commands ') as folder:
             scenario = Scenario(folder)

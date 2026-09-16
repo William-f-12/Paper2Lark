@@ -74,6 +74,13 @@ class IdentityTests(unittest.TestCase):
             with self.subTest(metadata=metadata), self.assertRaises(Paper2LarkError):
                 validate_add_request({**request, "source": {"kind": "doi", "value": "10.1000/ok"}, "metadata": metadata}, Path.cwd())
 
+    def test_source_kind_must_be_a_string_before_supported_kind_membership(self):
+        for kind in ([], {}, 42, True, None):
+            with self.subTest(kind=kind), self.assertRaises(Paper2LarkError) as raised:
+                normalize_source({"kind": kind, "value": "10.1000/valid"}, Path.cwd())
+            self.assertEqual(raised.exception.code, "SOURCE_INVALID")
+            self.assertEqual(str(raised.exception), "source requires a supported kind and string value")
+
     def test_add_request_is_versioned_strict_and_title_does_not_create_an_identity(self):
         request = {
             "schema_version": 1,

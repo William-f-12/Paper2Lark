@@ -109,7 +109,9 @@ def normalize_source(source: dict, base_dir: Path) -> dict:
     _strict_keys(source, {"kind", "value"}, "SOURCE_INVALID")
     kind = source.get("kind")
     value = source.get("value")
-    if kind not in {"auto", "doi", "arxiv", "url", "file", "text"} or not isinstance(value, str):
+    if (not isinstance(kind, str)
+            or not isinstance(value, str)
+            or kind not in {"auto", "doi", "arxiv", "url", "file", "text"}):
         _error("SOURCE_INVALID", "source requires a supported kind and string value")
     if kind in {"file", "text"}:
         if not value:
