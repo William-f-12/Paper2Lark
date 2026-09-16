@@ -578,6 +578,59 @@ class PublicationTests(unittest.TestCase):
         self.assertEqual(state.get_active_run(
             self.home, self.binding['library_id'], interrupted['paper_uid'])['run_id'], newer)
 
+    def test_stranded_result_rejects_nested_multiselect_in_saved_baseline(self):
+        run_id, plan, run_dir, interrupted = self.strand_publication_result()
+        result_path = run_dir / 'publication-result.json'
+        historical = result_path.read_bytes()
+        latest = state.latest_baseline(
+            self.home, self.binding['library_id'], interrupted['paper_uid'])
+        corrupted_record = copy.deepcopy(latest['record'])
+        corrupted_record['keywords'] = [['tampered']]
+        state.save_baseline(
+            self.home, self.binding['library_id'], interrupted['paper_uid'],
+            latest['document_id'], latest['node_token'], latest['note_url'],
+            latest['content_digest'], latest['document_revision'], corrupted_record)
+        create_calls = self.documents.create_calls
+        update_calls = self.gateway.update_calls
+
+        with self.assertRaises(Paper2LarkError) as raised:
+            self.apply(run_id, plan)
+
+        self.assertEqual(raised.exception.code, 'RUN_INVALID')
+        self.assertEqual(result_path.read_bytes(), historical)
+        self.assertEqual(self.documents.create_calls, create_calls)
+        self.assertEqual(self.gateway.update_calls, update_calls)
+        self.assertEqual(state.get_active_run(
+            self.home, self.binding['library_id'], interrupted['paper_uid'])['run_id'], run_id)
+
+    def test_stranded_result_rejects_nested_multiselect_in_index_receipt(self):
+        run_id, plan, run_dir, interrupted = self.strand_publication_result()
+        result_path = run_dir / 'publication-result.json'
+        historical = result_path.read_bytes()
+        operation = state.get_operation(self.home, run_id, 2)
+        response = copy.deepcopy(operation['response'])
+        response['fields']['keywords'] = [['tampered']]
+        conn = sqlite3.connect(self.home / 'state.sqlite3')
+        try:
+            conn.execute(
+                'UPDATE operations SET response_snapshot=? WHERE operation_id=?',
+                (json.dumps(response), operation['operation_id']))
+            conn.commit()
+        finally:
+            conn.close()
+        create_calls = self.documents.create_calls
+        update_calls = self.gateway.update_calls
+
+        with self.assertRaises(Paper2LarkError) as raised:
+            self.apply(run_id, plan)
+
+        self.assertEqual(raised.exception.code, 'RUN_INVALID')
+        self.assertEqual(result_path.read_bytes(), historical)
+        self.assertEqual(self.documents.create_calls, create_calls)
+        self.assertEqual(self.gateway.update_calls, update_calls)
+        self.assertEqual(state.get_active_run(
+            self.home, self.binding['library_id'], interrupted['paper_uid'])['run_id'], run_id)
+
     def test_completed_manifest_retry_releases_only_its_exact_reservation(self):
         run_id = self.drafted_run()
         reservation = self.reserve(run_id)

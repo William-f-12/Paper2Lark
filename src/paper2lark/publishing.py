@@ -384,8 +384,23 @@ def _ensure_note(home, binding, run_id, run_dir, run, plan, documents):
 
 def _same(expected, actual):
     if isinstance(expected, list) and isinstance(actual, list):
-        return len(expected) == len(actual) and set(expected) == set(actual)
+        try:
+            return len(expected) == len(actual) and set(expected) == set(actual)
+        except TypeError:
+            return False
     return expected == actual
+
+
+def _flat_string_list(value):
+    return (isinstance(value, list)
+            and all(isinstance(item, str) for item in value))
+
+
+def _adoption_value_matches(expected, actual):
+    if isinstance(expected, list):
+        return (_flat_string_list(expected) and _flat_string_list(actual)
+                and _same(expected, actual))
+    return _same(expected, actual)
 
 
 def _index_changes(plan, current, note_url):
@@ -540,7 +555,8 @@ def _verified_completion_operations(home, binding, run_id, plan):
     changed = index_response.get('fields') if isinstance(index_response, dict) else None
     if (not isinstance(index_response, dict) or set(index_response) != {'fields'}
             or not isinstance(changed, dict)
-            or any(key not in desired or not _same(desired[key], value)
+            or any(key not in desired
+                   or not _adoption_value_matches(desired[key], value)
                    for key, value in changed.items())):
         _error('RUN_INVALID', 'The stranded publication index receipt does not match the plan.')
     return note, changed
@@ -596,16 +612,23 @@ def _adopt_stranded_result(home, binding, run_id, run_dir, run, plan):
             or baseline['content_digest'] != plan['publication_sha256']
             or baseline['document_revision'] != note['revision_id']
             or not isinstance(baseline.get('record'), dict)
-            or any(not _same(baseline['record'].get(key), value)
+            or any(not _adoption_value_matches(value, baseline['record'].get(key))
                    for key, value in changed.items())):
         _error('RUN_INVALID', 'The stranded result does not match the saved publication baseline.')
     desired = {**plan['desired_record'], 'note_url': note['note_url']}
-    if any(not _same(baseline['record'].get(key), desired[key])
+    if any(isinstance(value, list)
+           and (not _flat_string_list(value)
+                or not _flat_string_list(baseline['record'].get(field)))
+           for field, value in desired.items()):
+        _error('RUN_INVALID', 'The saved baseline contains a malformed multi-select field.')
+    if any(not _adoption_value_matches(
+            desired[key], baseline['record'].get(key))
            for key in ('note_url', 'summary')):
         _error('RUN_INVALID', 'The saved baseline does not contain the committed managed fields.')
     historical_warnings = [warning for field, warning in (
         ('keywords', 'KEYWORDS_CHANGED'), ('reading_status', 'STATUS_CHANGED'))
-        if field in desired and not _same(baseline['record'].get(field), desired[field])]
+        if field in desired and not _adoption_value_matches(
+            desired[field], baseline['record'].get(field))]
     if warnings != historical_warnings:
         _error('RUN_INVALID', 'The stranded result warnings do not match the saved baseline.')
 
@@ -613,6 +636,7 @@ def _adopt_stranded_result(home, binding, run_id, run_dir, run, plan):
                    {'publication_result': descriptor})
     state.release_run(home, binding['library_id'], plan['paper_uid'], run_id)
     return {**result, 'remote_mutations': False}
+
 
 def apply_publication(home, binding, settings, run_id, plan, runner, gateway,
                       documents=None):
