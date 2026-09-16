@@ -239,19 +239,37 @@ def _pdf_key_tail(container, key):
     matches = []
     index = 0
     scanned = 0
+    depth = 0
+    saw_dictionary = False
     while True:
         token, _, end = _pdf_token_span(container, index)
-        if token is None or token == b'stream':
+        if token is None:
+            if depth:
+                _error('PDF_UNSUPPORTED', 'A PDF dictionary is unterminated.')
             break
         scanned += 1
         if scanned > MAX_PDF_SCAN_TOKENS:
             _error('SOURCE_TOO_COMPLEX', 'PDF token scanning exceeds the safety limit.')
-        if token == target:
+        if token == b'<<':
+            depth += 1
+            saw_dictionary = True
+            if depth > MAX_PDF_LEXICAL_NESTING:
+                _error('SOURCE_TOO_COMPLEX',
+                       'PDF lexical nesting exceeds the safety limit.')
+        elif token == b'>>':
+            if depth == 0:
+                _error('PDF_UNSUPPORTED', 'A PDF dictionary has an unmatched delimiter.')
+            depth -= 1
+            if depth == 0:
+                break
+        elif token == b'stream' and depth == 0:
+            break
+        elif token == target and depth == 1:
             matches.append(end)
             if len(matches) > 1:
                 _error('PDF_UNSUPPORTED', 'A PDF dictionary repeats a reference key.')
         index = end
-    if not matches:
+    if not saw_dictionary or not matches:
         return None
     return container[matches[0]:]
 
@@ -309,23 +327,62 @@ def _pdf_reference_array(container, key, allow_empty=False):
     return references
 
 
-def _pdf_stream_end(data, index):
+def _pdf_direct_length(dictionary):
+    tail = _pdf_key_tail(dictionary, b'Length')
+    if tail is None:
+        _error('PDF_UNSUPPORTED', 'A PDF stream has no direct Length.')
+    raw, index = _pdf_token(tail)
+    length = _pdf_integer(raw, MAX_SOURCE_BYTES, True, 'stream length')
+    following, _ = _pdf_token(tail, index)
+    if (following is not None and following != b'>>'
+            and not following.startswith(b'/')):
+        _error('PDF_UNSUPPORTED', 'A PDF stream Length must be a direct integer.')
+    return length
+
+
+def _pdf_stream_extent(data, body_start, stream_start, stream_end):
+    length = _pdf_direct_length(data[body_start:stream_start])
+    index = stream_end
     while index < len(data) and data[index] in b'\x00\x09\x0c\x20':
         index += 1
     if data[index:index + 2] == b'\r\n':
-        index += 2
+        content_start = index + 2
     elif index < len(data) and data[index] in b'\r\n':
-        index += 1
+        content_start = index + 1
     else:
         _error('PDF_UNSUPPORTED', 'A PDF stream header is malformed.')
-    match = re.search(rb'(?:\r\n|\r|\n)endstream(?=[\x00\x09\x0a\x0c\x0d\x20()<>\[\]{}/%]|$)',
-                      data[index:])
-    if match is None:
-        _error('PDF_UNSUPPORTED', 'A PDF stream is unterminated.')
-    return index + match.end()
+
+    content_end = content_start + length
+    if content_end > len(data):
+        _error('PDF_UNSUPPORTED', 'A PDF stream is truncated.')
+
+    index = content_end
+    saw_eol = False
+    separator_bytes = 0
+    while index < len(data) and data[index] in b'\x00\x09\x0a\x0c\x0d\x20':
+        if data[index] in b'\r\n':
+            saw_eol = True
+        index += 1
+        separator_bytes += 1
+        if separator_bytes > 64:
+            _error('SOURCE_TOO_COMPLEX',
+                   'A PDF stream delimiter exceeds the safety limit.')
+    if not saw_eol:
+        _error('PDF_UNSUPPORTED',
+               'A PDF stream Length does not end at its delimiter.')
+    marker = b'endstream'
+    if data[index:index + len(marker)] != marker:
+        _error('PDF_UNSUPPORTED',
+               'A PDF stream Length does not locate endstream.')
+    marker_end = index + len(marker)
+    if (marker_end < len(data)
+            and data[marker_end] not in b'\x00\x09\x0a\x0c\x0d\x20()<>[]{}/%'):
+        _error('PDF_UNSUPPORTED', 'A PDF endstream marker is malformed.')
+    return content_start, content_end, marker_end
 
 
 def _pdf_object_end(data, index):
+    body_start = index
     scanned = 0
     while True:
         token, start, end = _pdf_token_span(data, index)
@@ -335,10 +392,28 @@ def _pdf_object_end(data, index):
         if scanned > MAX_PDF_SCAN_TOKENS:
             _error('SOURCE_TOO_COMPLEX', 'PDF token scanning exceeds the safety limit.')
         if token == b'stream':
-            index = _pdf_stream_end(data, end)
+            _, _, index = _pdf_stream_extent(
+                data, body_start, start, end)
             continue
         if token == b'endobj':
             return start, end
+        index = end
+
+
+def _pdf_stream_data(body):
+    index = 0
+    scanned = 0
+    while True:
+        token, start, end = _pdf_token_span(body, index)
+        if token is None:
+            return None, None
+        scanned += 1
+        if scanned > MAX_PDF_SCAN_TOKENS:
+            _error('SOURCE_TOO_COMPLEX', 'PDF token scanning exceeds the safety limit.')
+        if token == b'stream':
+            content_start, content_end, _ = _pdf_stream_extent(
+                body, 0, start, end)
+            return body[content_start:content_end], start
         index = end
 
 
@@ -510,11 +585,10 @@ def _pdf_pages(payload):
         pieces = []
         for reference in refs:
             body = objects.get(reference, b'')
-            match = re.search(rb'\bstream\r?\n(.*?)\r?\nendstream\b', body, re.DOTALL)
-            if match is None:
+            data, stream_start = _pdf_stream_data(body)
+            if data is None:
                 continue
-            data = match.group(1)
-            if b'/FlateDecode' in body[:match.start()]:
+            if b'/FlateDecode' in body[:stream_start]:
                 try:
                     limit = MAX_EXTRACTED_BYTES - extracted_size
                     decompressor = zlib.decompressobj()

@@ -36,8 +36,8 @@ def reversed_page_pdf():
     return (b'%PDF-1.4\n'
             b'1 0 obj\n<< /Type /Page /Parent 5 0 R /Contents 3 0 R >>\nendobj\n'
             b'2 0 obj\n<< /Type /Page /Parent 5 0 R /Contents 4 0 R >>\nendobj\n'
-            b'3 0 obj\n<< /Length 28 >>\nstream\nBT (Object First) Tj ET\nendstream\nendobj\n'
-            b'4 0 obj\n<< /Length 29 >>\nstream\nBT (Logical First) Tj ET\nendstream\nendobj\n'
+            b'3 0 obj\n<< /Length 23 >>\nstream\nBT (Object First) Tj ET\nendstream\nendobj\n'
+            b'4 0 obj\n<< /Length 24 >>\nstream\nBT (Logical First) Tj ET\nendstream\nendobj\n'
             b'5 0 obj\n<< /Type /Pages /Kids [2 0 R 1 0 R] /Count 2 >>\nendobj\n'
             b'6 0 obj\n<< /Type /Catalog /Pages 5 0 R >>\nendobj\n'
             b'trailer\n<< /Root 6 0 R >>\n%%EOF\n')
@@ -47,7 +47,7 @@ def blank_first_page_pdf():
     return (b'%PDF-1.4\n'
             b'1 0 obj\n<< /Type /Page /Parent 5 0 R >>\nendobj\n'
             b'2 0 obj\n<< /Type /Page /Parent 5 0 R /Contents 4 0 R >>\nendobj\n'
-            b'4 0 obj\n<< /Length 28 >>\nstream\nBT (Second Page) Tj ET\nendstream\nendobj\n'
+            b'4 0 obj\n<< /Length 22 >>\nstream\nBT (Second Page) Tj ET\nendstream\nendobj\n'
             b'5 0 obj\n<< /Type /Pages /Kids [1 0 R 2 0 R] /Count 2 >>\nendobj\n'
             b'6 0 obj\n<< /Type /Catalog /Pages 5 0 R >>\nendobj\n'
             b'trailer\n<< /Root 6 0 R >>\n%%EOF\n')
@@ -63,7 +63,7 @@ def commented_reference_pdf():
             b'/Count 1 >>\rendobj\r'
             b'1 0 obj\r<< /Type /Page /Parent 4 0 R /Note (/Contents 9 0 R) '
             b'% /Contents 8 0 R\r/Contents 2 % content object\r\n0 R >>\rendobj\r'
-            b'2 % stream header\n0\nobj\n<< /Length 52 >>\nstream\n'
+            b'2 % stream header\n0\nobj\n<< /Length 50 >>\nstream\n'
             b'BT (100% accurate /Pages 77 0 R obj) Tj ET\n9 9 obj\n'
             b'endstream\nendobj\ntrailer\n<< /Note (/Root 9 0 R) '
             b'% /Root 8 0 R\r/Root 3 % root object\n0 R >>\n%%EOF\n')
@@ -73,13 +73,45 @@ def rooted_extra_catalog_pdf():
     return (b'%PDF-1.4\n'
             b'1 0 obj\n<< /Type /Page /Parent 5 0 R /Contents 3 0 R >>\nendobj\n'
             b'2 0 obj\n<< /Type /Page /Parent 5 0 R /Contents 4 0 R >>\nendobj\n'
-            b'3 0 obj\n<< /Length 28 >>\nstream\nBT (Object First) Tj ET\nendstream\nendobj\n'
-            b'4 0 obj\n<< /Length 29 >>\nstream\nBT (Logical First) Tj ET\nendstream\nendobj\n'
+            b'3 0 obj\n<< /Length 23 >>\nstream\nBT (Object First) Tj ET\nendstream\nendobj\n'
+            b'4 0 obj\n<< /Length 24 >>\nstream\nBT (Logical First) Tj ET\nendstream\nendobj\n'
             b'5 0 obj\n<< /Type /Pages /Kids [2 0 R 1 0 R] /Count 2 >>\nendobj\n'
             b'6 0 obj\n<< /Type /Catalog /Pages 5 0 R >>\nendobj\n'
             b'7 0 obj\n<< /Type /Pages /Kids [1 0 R 2 0 R] /Count 2 >>\nendobj\n'
             b'8 0 obj\n<< /Type /Catalog /Pages 7 0 R >>\nendobj\n'
             b'trailer\n<< /Root 6 0 R >>\n%%EOF\n')
+
+def nested_dictionary_pdf():
+    object_first = b'BT (Object First) Tj ET'
+    logical_first = b'BT (Logical First) Tj ET'
+    return (b'%PDF-1.4\n'
+            b'3 0 obj\n<< /Metadata << /Type /Page /Pages 99 0 R >> '
+            b'/Type /Catalog /Pages 4 0 R >>\nendobj\n'
+            b'4 0 obj\n<< /Resources << /Type /Page /Kids [9 0 R] >> '
+            b'/Type /Pages /Kids [2 0 R 1 0 R] /Count 2 >>\nendobj\n'
+            b'1 0 obj\n<< /Resources << /XObject << /Type /Catalog '
+            b'/Contents 9 0 R /Pages 99 0 R >> >> '
+            b'/Type /Page /Parent 4 0 R /Contents 5 0 R >>\nendobj\n'
+            b'2 0 obj\n<< /Resources << /XObject << /Type /Pages '
+            b'/Contents 8 0 R /Kids [9 0 R] >> >> '
+            b'/Type /Page /Parent 4 0 R /Contents 6 0 R >>\nendobj\n'
+            b'5 0 obj\n<< /Metadata << /Length 1 >> /Length ' + str(len(object_first)).encode()
+            + b' >>\nstream\n' + object_first + b'\nendstream\nendobj\n'
+            b'6 0 obj\n<< /Metadata << /Length 1 >> /Length ' + str(len(logical_first)).encode()
+            + b' >>\nstream\n' + logical_first + b'\nendstream\nendobj\n'
+            b'trailer\n<< /Info << /Root 8 0 R >> /Root 3 0 R >>\n%%EOF\n')
+
+
+def stream_length_pdf(length, content=b'BT (valid stream content) Tj ET',
+                      include_length=True, terminator=b'\nendstream'):
+    length_entry = (b' /Length ' + length) if include_length else b''
+    return (b'%PDF-1.4\n'
+            b'3 0 obj\n<< /Type /Catalog /Pages 4 0 R >>\nendobj\n'
+            b'4 0 obj\n<< /Type /Pages /Kids [1 0 R] /Count 1 >>\nendobj\n'
+            b'1 0 obj\n<< /Type /Page /Parent 4 0 R /Contents 2 0 R >>\nendobj\n'
+            b'2 0 obj\n<<' + length_entry + b' >>\nstream\n' + content
+            + terminator + b'\nendobj\ntrailer\n<< /Root 3 0 R >>\n%%EOF\n')
+
 
 def oversized_pdf_number(location):
     huge = b'9' * 5000
@@ -91,7 +123,7 @@ def oversized_pdf_number(location):
     return (b'%PDF-1.4\n3 0 obj\n<< /Type /Catalog /Pages ' + catalog_pages
             + b' 0 R >>\nendobj\n4 0 obj\n<< /Type /Pages /Kids [' + kids
             + b' 0 R] /Count 1 >>\nendobj\n1 0 obj\n<< /Type /Page /Parent 4 0 R /Contents '
-            + contents + b' 0 R >>\nendobj\n2 0 obj\n<< /Length 18 >>\nstream\n'
+            + contents + b' 0 R >>\nendobj\n2 0 obj\n<< /Length 16 >>\nstream\n'
             + b'BT (valid) Tj ET\nendstream\nendobj\n%%EOF\n')
 
 
@@ -102,7 +134,7 @@ def leading_zero_pdf():
             b'00000001 00000 obj\n<< /Type /Pages /Kids [08388607 00000 R] '
             b'/Count 1 >>\nendobj\n'
             b'00000002 00000 obj\n<< /Type /Catalog /Pages 00000001 00000 R >>\nendobj\n'
-            b'00000003 00000 obj\n<< /Length 18 >>\nstream\n'
+            b'00000003 00000 obj\n<< /Length 16 >>\nstream\n'
             b'BT (valid) Tj ET\nendstream\nendobj\n'
             b'trailer\n<< /Root 00000002 00000 R >>\n%%EOF\n')
 
@@ -117,7 +149,7 @@ def malformed_pdf_reference(location, value):
             + b'3 0 obj\n<< /Type /Catalog /Pages ' + pages + b' >>\nendobj\n'
             + b'4 0 obj\n<< /Type /Pages /Kids [' + kids + b'] /Count 1 >>\nendobj\n'
             + b'1 0 obj\n<< /Type /Page /Parent 4 0 R /Contents ' + contents
-            + b' >>\nendobj\n2 0 obj\n<< /Length 18 >>\nstream\n'
+            + b' >>\nendobj\n2 0 obj\n<< /Length 16 >>\nstream\n'
             + b'BT (valid) Tj ET\nendstream\nendobj\ntrailer\n<< /Root ' + root
             + b' >>\n%%EOF\n')
 
@@ -147,6 +179,97 @@ class SourceIngestionTests(unittest.TestCase):
         self.assertIn('Object First', texts[1])
         self.assertEqual([item['locator']['value'] for item in bundle['sections']], ['1', '2'])
         self.assertNotIn('PDF_PAGE_ORDER_UNVERIFIED', bundle['warnings'])
+
+    def test_nested_dictionary_keys_do_not_shadow_top_level_page_fields(self):
+        paper = self.root / 'nested-dictionaries.pdf'
+        paper.write_bytes(nested_dictionary_pdf())
+        ingest_source(self.home, self.run['run_id'],
+                      validate_source_input(self.input('pdf', paper), self.root))
+        run_dir, _ = load_run(self.home, self.run['run_id'])
+        bundle = json.loads((run_dir / 'source.json').read_text(encoding='utf-8'))
+        texts = [(run_dir / section['text_path']).read_text(encoding='utf-8').strip()
+                 for section in bundle['sections']]
+        self.assertEqual(texts, ['Logical First', 'Object First'])
+        self.assertEqual([section['locator']['value'] for section in bundle['sections']],
+                         ['1', '2'])
+        self.assertNotIn('PDF_PAGE_ORDER_UNVERIFIED', bundle['warnings'])
+
+    def test_stream_length_keeps_embedded_structural_markers_opaque(self):
+        content = (b'BT (Before) Tj ET\nendstream\n9 9 obj\nendobj\n'
+                   b'BT (After) Tj ET')
+        paper = self.root / 'embedded-stream-markers.pdf'
+        paper.write_bytes(stream_length_pdf(str(len(content)).encode(), content))
+        ingest_source(self.home, self.run['run_id'],
+                      validate_source_input(self.input('pdf', paper), self.root))
+        run_dir, _ = load_run(self.home, self.run['run_id'])
+        bundle = json.loads((run_dir / 'source.json').read_text(encoding='utf-8'))
+        text = (run_dir / bundle['sections'][0]['text_path']).read_text(encoding='utf-8')
+        self.assertEqual(text.strip(), 'Before After')
+        self.assertEqual(bundle['sections'][0]['locator'], {'kind': 'page', 'value': '1'})
+
+    def test_cr_only_stream_boundaries_use_direct_length(self):
+        content = b'BT (CR stream) Tj ET'
+        payload = stream_length_pdf(
+            str(len(content)).encode(), content,
+            terminator=b'\rendstream').replace(b'stream\n', b'stream\r', 1)
+        paper = self.root / 'cr-stream.pdf'
+        paper.write_bytes(payload)
+        ingest_source(self.home, self.run['run_id'],
+                      validate_source_input(self.input('pdf', paper), self.root))
+        run_dir, _ = load_run(self.home, self.run['run_id'])
+        bundle = json.loads((run_dir / 'source.json').read_text(encoding='utf-8'))
+        extracted = (run_dir / bundle['sections'][0]['text_path']).read_text(
+            encoding='utf-8').strip()
+        self.assertEqual(extracted, 'CR stream')
+
+    def test_stream_length_is_direct_bounded_and_exact(self):
+        fixtures = {
+            'missing': (stream_length_pdf(b'', include_length=False), 'PDF_UNSUPPORTED'),
+            'indirect': (stream_length_pdf(b'5 0 R'), 'PDF_UNSUPPORTED'),
+            'negative': (stream_length_pdf(b'-1'), 'PDF_UNSUPPORTED'),
+            'malformed': (stream_length_pdf(b'abc'), 'PDF_UNSUPPORTED'),
+            'oversized-digits': (stream_length_pdf(b'9' * 5000), 'SOURCE_TOO_COMPLEX'),
+            'oversized-value': (stream_length_pdf(b'33554433'), 'SOURCE_TOO_COMPLEX'),
+            'short-offset': (stream_length_pdf(b'3'), 'PDF_UNSUPPORTED'),
+            'long-offset': (stream_length_pdf(b'34'), 'PDF_UNSUPPORTED'),
+            'truncated': (stream_length_pdf(b'100'), 'PDF_UNSUPPORTED'),
+            'missing-endstream': (
+                stream_length_pdf(b'32', terminator=b'\nnot-endstream'),
+                'PDF_UNSUPPORTED'),
+            'separator-overflow': (
+                stream_length_pdf(b'31', terminator=b'\n' + b' ' * 65
+                                  + b'endstream'),
+                'SOURCE_TOO_COMPLEX'),
+        }
+        for case, (payload, code) in fixtures.items():
+            local_home = self.root / f'home-stream-{case}'
+            run = create_run(
+                local_home,
+                {'schema_version': 1, 'persist_to_library': False,
+                 'requested_depth': 'quick', 'reader_preference': 'builtin',
+                 'force_reread': False, 'record_id': 'recStreamLength'},
+                {'schema_version': 1, 'document_id': 'doc', 'revision_id': '1',
+                 'content_digest': 'b' * 64, 'raw_content': '# Notes', 'blocks': []},
+                {'schema_version': 1, 'missing_work': ['source_bundle']})
+            paper = self.root / f'stream-{case}.pdf'
+            paper.write_bytes(payload)
+            with self.subTest(case=case):
+                with self.assertRaises(Paper2LarkError) as raised:
+                    ingest_source(
+                        local_home, run['run_id'],
+                        validate_source_input(self.input('pdf', paper), self.root))
+                self.assertEqual(raised.exception.code, code)
+
+    def test_true_same_level_reference_key_duplicates_are_rejected(self):
+        content = b'BT (duplicate) Tj ET'
+        payload = stream_length_pdf(str(len(content)).encode(), content).replace(
+            b'/Contents 2 0 R', b'/Contents 2 0 R /Contents 2 0 R')
+        paper = self.root / 'duplicate-contents.pdf'
+        paper.write_bytes(payload)
+        with self.assertRaises(Paper2LarkError) as raised:
+            ingest_source(self.home, self.run['run_id'],
+                          validate_source_input(self.input('pdf', paper), self.root))
+        self.assertEqual(raised.exception.code, 'PDF_UNSUPPORTED')
 
     def test_leading_zero_object_headers_and_references_ingest_successfully(self):
         paper = self.root / 'leading-zero.pdf'

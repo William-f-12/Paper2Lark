@@ -156,13 +156,15 @@ class PackageTests(unittest.TestCase):
     def test_bundled_launcher_honors_root_and_pdf_comments(self):
         content_one = b'BT (Logical First) Tj ET'
         content_two = b'BT (Object First) Tj ET'
+        stream_one = (content_one
+                      + b'\r\n9 9 obj /Type /Catalog /Pages 7 0 R')
         pdf_payload = (
             b'%PDF-1.4\r'
             b'1 % page one header\r\n0 % generation\robj\r'
             b'<< /Type /Page /Parent 5 0 R /Contents 3 % ref\r0 R >>\rendobj\r'
             b'2 0 obj\r<< /Type /Page /Parent 5 0 R /Contents 4 0 R >>\rendobj\r'
-            b'3 0 obj\r<< /Length 24 >>\rstream\r\n' + content_one
-            + b'\r\n9 9 obj /Type /Catalog /Pages 7 0 R\r\nendstream\rendobj\r'
+            b'3 0 obj\r<< /Length ' + str(len(stream_one)).encode()
+            + b' >>\rstream\r\n' + stream_one + b'\r\nendstream\rendobj\r'
             b'4 0 obj\r<< /Length 23 >>\rstream\r\n' + content_two
             + b'\r\nendstream\rendobj\r'
             b'5 0 obj\r<< /Type /Pages /Kids [2 % first\r0 R 1 0 R] /Count 2 >>\rendobj\r'
@@ -216,6 +218,58 @@ class PackageTests(unittest.TestCase):
             self.assertNotIn('Traceback', result.stderr)
             self.assertFalse(marker.exists())
 
+    def test_bundled_launcher_keeps_embedded_stream_markers_opaque(self):
+        content = (b'BT (Before) Tj ET\nendstream\n9 9 obj\nendobj\n'
+                   b'BT (After) Tj ET')
+        payload = (
+            b'%PDF-1.4\n'
+            b'3 0 obj\n<< /Type /Catalog /Pages 4 0 R >>\nendobj\n'
+            b'4 0 obj\n<< /Type /Pages /Kids [1 0 R] /Count 1 >>\nendobj\n'
+            b'1 0 obj\n<< /Type /Page /Parent 4 0 R /Contents 2 0 R >>\nendobj\n'
+            b'2 0 obj\n<< /Length ' + str(len(content)).encode()
+            + b' >>\nstream\n' + content + b'\nendstream\nendobj\n'
+            b'trailer\n<< /Root 3 0 R >>\n%%EOF\n')
+        with tempfile.TemporaryDirectory(prefix='p2l-packaged-pdf-stream-') as folder:
+            base = Path(folder)
+            home = base / 'home'
+            run = create_run(
+                home,
+                {'schema_version': 1, 'persist_to_library': False,
+                 'requested_depth': 'quick', 'reader_preference': 'builtin',
+                 'force_reread': False, 'record_id': 'recStreamPdf'},
+                {'schema_version': 1, 'document_id': 'doc', 'revision_id': '1',
+                 'content_digest': 'b' * 64, 'raw_content': '# Notes', 'blocks': []},
+                {'schema_version': 1, 'missing_work': ['source_bundle']})
+            pdf = base / 'paper.pdf'
+            pdf.write_bytes(payload)
+            source_input = base / 'source.json'
+            source_input.write_text(json.dumps({
+                'schema_version': 1, 'kind': 'pdf', 'path': str(pdf),
+                'original_location': 'embedded stream marker fixture', 'metadata': {},
+            }), encoding='utf-8')
+            marker = base / 'provider-called'
+            fake_cli = base / 'fake-lark.py'
+            fake_cli.write_text(
+                'from pathlib import Path\nPath(r"' + str(marker) + '").write_text("called")\n',
+                encoding='utf-8')
+            package = ROOT / 'dist/codex/plugins/paper2lark'
+            result = subprocess.run([
+                sys.executable, str(package / 'scripts/paper2lark.py'),
+                '--home', str(home), '--lark-cli', str(fake_cli),
+                'sources', 'ingest', '--run', run['run_id'], '--input', str(source_input),
+            ], cwd=base, capture_output=True, text=True, encoding='utf-8')
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            documents = [line for line in result.stdout.splitlines() if line.strip()]
+            self.assertEqual(len(documents), 1, result.stdout)
+            self.assertTrue(json.loads(documents[0])['ok'])
+            run_dir = home / 'runs' / run['run_id']
+            source = json.loads((run_dir / 'source.json').read_text(encoding='utf-8'))
+            extracted = (run_dir / source['sections'][0]['text_path']).read_text(
+                encoding='utf-8').strip()
+            self.assertEqual(extracted, 'Before After')
+            self.assertNotIn('Traceback', result.stderr)
+            self.assertFalse(marker.exists())
+
     def test_bundled_launcher_structures_malformed_pdf_references(self):
         huge = b'9' * 5000
 
@@ -224,7 +278,7 @@ class PackageTests(unittest.TestCase):
             return (b'%PDF-1.4\n3 0 obj\n<< /Type /Catalog /Pages ' + pages
                     + b' >>\nendobj\n4 0 obj\n<< /Type /Pages /Kids [' + kids
                     + b'] /Count 1 >>\nendobj\n1 0 obj\n<< /Type /Page /Parent 4 0 R /Contents '
-                    + contents + b' >>\nendobj\n2 0 obj\n<< /Length 18 >>\nstream\n'
+                    + contents + b' >>\nendobj\n2 0 obj\n<< /Length 16 >>\nstream\n'
                     + b'BT (valid) Tj ET\nendstream\nendobj\ntrailer\n<< /Root '
                     + root + b' >>\n%%EOF\n')
         fixtures = {
