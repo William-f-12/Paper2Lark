@@ -111,7 +111,8 @@ class Documents:
         if hashlib.sha256(item['content'].encode('utf-8')).hexdigest() != expected_content_sha256:
             raise Paper2LarkError('DOCUMENT_VERIFICATION_FAILED', 'content digest mismatch')
         return {'document_id': document_id, 'revision_id': item['revision_id'],
-                'node_token': item['node_token'], 'content': item['content']}
+                'node_token': item['node_token'], 'content': item['content'],
+                'content_sha256': hashlib.sha256(item['content'].encode('utf-8')).hexdigest()}
 
     def recover_created_document(self, before_children, markers, expected_content_sha256):
         before = set(before_children)
@@ -160,7 +161,7 @@ class PublicationTests(unittest.TestCase):
         self.gateway = Gateway(logical_record())
         self.documents = Documents()
 
-    def drafted_run(self, persist=True, requested='full', main='complete'):
+    def drafted_run(self, persist=True, requested='full', main='complete', draft_text=None):
         state.initialize(self.home)
         tracked = state.sync_paper(
             self.home, self.binding['library_id'], digest(self.binding),
@@ -203,7 +204,8 @@ class PublicationTests(unittest.TestCase):
         run = transition_run(self.home, run['run_id'], 'awaiting_agent', 'submitting',
                              {'role_map': role, 'analysis': analysis, 'note_plan': note},
                              submission=submission)
-        draft = write_text_artifact(run_dir, 'draft.md', '# Summary\n\nA concise verified takeaway.\n')
+        draft = write_text_artifact(
+            run_dir, 'draft.md', draft_text or '# Summary\n\nA concise verified takeaway.\n')
         verification = write_artifact(run_dir, 'verification.json', {
             'schema_version': 1, 'run_id': run['run_id'], 'coverage': analysis_value['actual_coverage'],
             'keywords': ['Machine Learning'], 'warnings': [], 'result': 'drafted'})
@@ -255,6 +257,59 @@ class PublicationTests(unittest.TestCase):
         self.assertEqual(self.documents.create_calls, 1)
         self.assertEqual(self.gateway.update_calls, 1)
 
+    def test_large_verified_note_uses_compact_receipt_and_is_idempotent(self):
+        run_id = self.drafted_run(draft_text='# Summary\n\n' + ('x' * 270_000))
+        plan = json.loads(Path(self.plan(run_id)['plan_path']).read_text(encoding='utf-8'))
+
+        result = self.apply(run_id, plan)
+
+        self.assertEqual(result['status'], 'completed')
+        self.assertEqual(self.documents.create_calls, 1)
+        self.assertEqual(self.gateway.update_calls, 1)
+        operation = state.get_operation(self.home, run_id, 1)
+        self.assertEqual(operation['outcome'], 'verified')
+        self.assertEqual(set(operation['response']), {'document_id', 'node_token', 'revision_id',
+                                                  'content_sha256', 'note_url'})
+        self.assertEqual(operation['response']['content_sha256'], plan['publication_sha256'])
+        self.assertLess(len(json.dumps(operation['response']).encode('utf-8')), 4096)
+
+        repeated = self.apply(run_id, plan)
+        self.assertEqual(repeated['status'], 'completed')
+        self.assertEqual(self.documents.create_calls, 1)
+        self.assertEqual(self.gateway.update_calls, 1)
+
+    def test_created_operation_persists_only_document_identity(self):
+        run_id = self.drafted_run()
+        plan = json.loads(Path(self.plan(run_id)['plan_path']).read_text(encoding='utf-8'))
+
+        def fail_verification(*_args):
+            raise Paper2LarkError('DOCUMENT_VERIFICATION_FAILED', 'synthetic readback failure')
+
+        self.documents.verify_document = fail_verification
+        with self.assertRaises(Paper2LarkError) as raised:
+            self.apply(run_id, plan)
+        self.assertEqual(raised.exception.code, 'DOCUMENT_VERIFICATION_FAILED')
+        operation = state.get_operation(self.home, run_id, 1)
+        self.assertEqual(operation['outcome'], 'applied')
+        self.assertEqual(operation['response'],
+                         {'document_id': 'doc-created', 'revision_id': 3})
+
+    def test_near_snapshot_and_chinese_notes_use_compact_receipts(self):
+        for body in ('x' * 255_000, '中文研究结果。' * 40_000):
+            with self.subTest(size=len(body.encode('utf-8'))):
+                run_id = self.drafted_run(draft_text='# Summary\n\n' + body)
+                plan = json.loads(Path(self.plan(run_id)['plan_path']).read_text(encoding='utf-8'))
+                self.assertEqual(self.apply(run_id, plan)['status'], 'completed')
+                response = state.get_operation(self.home, run_id, 1)['response']
+                self.assertNotIn('content', response)
+                self.assertEqual(response['content_sha256'], plan['publication_sha256'])
+
+    def test_oversize_publication_artifact_fails_before_document_creation(self):
+        with self.assertRaises(Paper2LarkError) as raised:
+            self.drafted_run(draft_text='# Summary\n\n' + ('x' * (4 * 1024 * 1024)))
+        self.assertEqual(raised.exception.code, 'ARTIFACT_TOO_LARGE')
+        self.assertEqual(self.documents.create_calls, 0)
+
     def test_lost_create_response_recovers_without_second_create(self):
         run_id = self.drafted_run()
         plan = json.loads(Path(self.plan(run_id)['plan_path']).read_text(encoding='utf-8'))
@@ -266,6 +321,52 @@ class PublicationTests(unittest.TestCase):
                          'uncertain_remote_commit')
         result = self.apply(run_id, plan)
         self.assertEqual(result['status'], 'completed')
+        self.assertEqual(self.documents.create_calls, 1)
+        self.assertNotIn('content', state.get_operation(self.home, run_id, 1)['response'])
+
+    def test_legacy_applied_operation_is_projected_after_verification(self):
+        run_id = self.drafted_run()
+        plan = json.loads(Path(self.plan(run_id)['plan_path']).read_text(encoding='utf-8'))
+        run_dir, _ = load_run(self.home, run_id)
+        created = self.documents.create_markdown_raw(
+            run_dir, run_dir / 'publication.md', plan['title'])
+        operation = state.start_operation(
+            self.home, run_id, 1, 'create_note', self.binding['wiki']['notes_parent'],
+            plan['publication_sha256'], {'children': plan['before_children']},
+            {'title': plan['title'], 'markers': plan['markers'],
+             'content_sha256': plan['publication_sha256']})
+        legacy = {**created, **self.documents.verify_document(
+            created['document_id'], plan['markers'], plan['publication_sha256'])}
+        state.record_operation_result(
+            self.home, operation['operation_id'], 'applied',
+            remote_id=created['document_id'], response=legacy)
+
+        self.assertEqual(self.apply(run_id, plan)['status'], 'completed')
+        stored = state.get_operation(self.home, run_id, 1)['response']
+        self.assertNotIn('content', stored)
+        self.assertEqual(stored['content_sha256'], plan['publication_sha256'])
+        self.assertEqual(self.documents.create_calls, 1)
+
+    def test_legacy_verified_receipt_remains_readable_without_rewrite(self):
+        run_id = self.drafted_run()
+        plan = json.loads(Path(self.plan(run_id)['plan_path']).read_text(encoding='utf-8'))
+        run_dir, _ = load_run(self.home, run_id)
+        created = self.documents.create_markdown_raw(
+            run_dir, run_dir / 'publication.md', plan['title'])
+        verified = {**created, **self.documents.verify_document(
+            created['document_id'], plan['markers'], plan['publication_sha256'])}
+        operation = state.start_operation(
+            self.home, run_id, 1, 'create_note', self.binding['wiki']['notes_parent'],
+            plan['publication_sha256'], {'children': plan['before_children']},
+            {'title': plan['title'], 'markers': plan['markers'],
+             'content_sha256': plan['publication_sha256']})
+        state.record_operation_result(
+            self.home, operation['operation_id'], 'verified',
+            remote_id=created['document_id'], response=verified)
+
+        self.assertEqual(self.apply(run_id, plan)['status'], 'completed')
+        stored = state.get_operation(self.home, run_id, 1)['response']
+        self.assertEqual(stored['content'], verified['content'])
         self.assertEqual(self.documents.create_calls, 1)
 
     def test_lost_index_response_is_verified_on_resume(self):

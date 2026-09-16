@@ -298,6 +298,31 @@ def _note_from_operation(binding, operation):
         binding, response['node_token'], response.get('url'))}
 
 
+def _created_note_receipt(response):
+    """Persist only the identity available before document readback."""
+    if (not isinstance(response, dict) or not isinstance(response.get('document_id'), str)
+            or not response['document_id'] or type(response.get('revision_id')) is not int
+            or response['revision_id'] < 0):
+        _error('DOCUMENT_RESPONSE_INVALID', 'The created document identity is incomplete.')
+    return {'document_id': response['document_id'],
+            'revision_id': response['revision_id']}
+
+
+def _verified_note_receipt(binding, response, expected_content_sha256):
+    """Discard provider readback content after it has been verified in memory."""
+    if (not isinstance(response, dict) or not isinstance(response.get('document_id'), str)
+            or not response['document_id'] or not isinstance(response.get('node_token'), str)
+            or not response['node_token'] or type(response.get('revision_id')) is not int
+            or response['revision_id'] < 0
+            or response.get('content_sha256') != expected_content_sha256):
+        _error('DOCUMENT_RESPONSE_INVALID', 'The verified document receipt is incomplete.')
+    return {'document_id': response['document_id'],
+            'node_token': response['node_token'],
+            'revision_id': response['revision_id'],
+            'content_sha256': response['content_sha256'],
+            'note_url': _wiki_url(binding, response['node_token'], response.get('url'))}
+
+
 def _ensure_note(home, binding, run_id, run_dir, run, plan, documents):
     current_status = run['status']
     if current_status == 'planned':
@@ -320,7 +345,7 @@ def _ensure_note(home, binding, run_id, run_dir, run, plan, documents):
                     run_dir, run_dir / 'publication.md', plan['title'])
                 operation = state.record_operation_result(
                     home, operation['operation_id'], 'applied',
-                    remote_id=created['document_id'], response=created)
+                    remote_id=created['document_id'], response=_created_note_receipt(created))
                 verified = documents.verify_document(
                     created['document_id'], plan['markers'], plan['publication_sha256'])
                 response = {**created, **verified}
@@ -332,11 +357,11 @@ def _ensure_note(home, binding, run_id, run_dir, run, plan, documents):
                 verified = documents.recover_created_document(
                     plan['before_children'], plan['markers'], plan['publication_sha256'])
                 response = verified
-            response['note_url'] = _wiki_url(
-                binding, response['node_token'], response.get('url'))
+            receipt = _verified_note_receipt(
+                binding, response, plan['publication_sha256'])
             operation = state.record_operation_result(
                 home, operation['operation_id'], 'verified',
-                remote_id=response['document_id'], response=response)
+                remote_id=receipt['document_id'], response=receipt)
             note = _note_from_operation(binding, operation)
         except Paper2LarkError as error:
             if error.code in {'REMOTE_RESULT_UNCERTAIN', 'REMOTE_COMMIT_UNCERTAIN'}:
