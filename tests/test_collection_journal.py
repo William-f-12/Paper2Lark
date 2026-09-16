@@ -4,13 +4,15 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from paper2lark.errors import Paper2LarkError
 from paper2lark.collection_journal import (begin_intent, find_pending, record_created, verify_intent,
-                                           finish_intent, _windows_dacl_sids, _windows_user_sid)
+                                           finish_intent, _windows_dacl_sids, _windows_owner_sid, _windows_user_sid,
+                                           _private_windows_dacl)
 
 
 LIBRARY = "a" * 32
@@ -58,6 +60,11 @@ class CollectionJournalTests(unittest.TestCase):
         allowed = {_windows_user_sid(), "S-1-5-18", "S-1-5-32-544"}
         self.assertEqual(_windows_dacl_sids(root), allowed)
         self.assertEqual(_windows_dacl_sids(artifact), allowed)
+        self.assertEqual(_windows_owner_sid(root), _windows_user_sid())
+        self.assertEqual(_windows_owner_sid(artifact), _windows_user_sid())
+        with mock.patch('paper2lark.collection_journal._windows_owner_sid', return_value='S-1-5-21-untrusted'):
+            with self.assertRaises(OSError):
+                _private_windows_dacl(artifact)
     def test_created_id_is_durable_before_verification_and_completion_is_idempotent(self):
         intent = begin_intent(self.home, self.binding, self.identity, self.fields)
         created = record_created(self.home, intent, "recJournal")

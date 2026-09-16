@@ -345,7 +345,7 @@ class CommandTests(unittest.TestCase):
     def test_add_preview_is_read_only_and_metacharacters_remain_data(self):
         with tempfile.TemporaryDirectory(prefix='命令 preview ') as folder:
             scenario = Scenario(folder)
-            secret = 'PRIVATE_PAPER_TEXT_7ca15; $(whoami) \never-run`'
+            secret = 'PRIVATE_PAPER_TEXT_7ca15; $(whoami) `never-run`'
             request = scenario.request('paper request.json', self.add_request(secret))
             before_binding = (scenario.home / 'profiles/personal/bindings.json').read_bytes()
             before_entries = {str(path.relative_to(scenario.home))
@@ -354,14 +354,14 @@ class CommandTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(data['data']['action'], 'create')
             self.assertFalse(data['data']['remote_mutations'])
-            self.assertEqual(data['data']['field_changes']['title'], secret)
+            self.assertEqual(data['data']['field_changes']['title'],
+                             'PRIVATE_PAPER_TEXT_7ca15; $(whoami) `never-run`')
             self.assertEqual(scenario.provider()['writes'], [])
             self.assertFalse((scenario.home / 'state.sqlite3').exists())
             self.assertEqual((scenario.home / 'profiles/personal/bindings.json').read_bytes(), before_binding)
             self.assertEqual({str(path.relative_to(scenario.home))
                               for path in scenario.home.rglob('*')}, before_entries)
             self.assertNotIn(secret, result.stderr)
-
     def test_apply_requires_v2_before_provider_then_creates_unread_and_repeats_noop(self):
         with tempfile.TemporaryDirectory(prefix='命令 apply ') as folder:
             scenario = Scenario(folder)

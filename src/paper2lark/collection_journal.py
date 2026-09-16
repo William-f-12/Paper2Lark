@@ -67,6 +67,42 @@ def _windows_user_sid():
         kernel32.CloseHandle(token)
 
 
+def _windows_owner_sid(path):
+    """Read a path owner SID and fail closed when its descriptor is unavailable."""
+    if os.name != "nt":
+        return None
+    import ctypes
+    from ctypes import wintypes
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi32.GetFileSecurityW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.LPVOID,
+                                          wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+    advapi32.GetFileSecurityW.restype = wintypes.BOOL
+    advapi32.GetSecurityDescriptorOwner.argtypes = [wintypes.LPVOID, ctypes.POINTER(wintypes.LPVOID),
+                                                    ctypes.POINTER(wintypes.BOOL)]
+    advapi32.GetSecurityDescriptorOwner.restype = wintypes.BOOL
+    advapi32.ConvertSidToStringSidW.argtypes = [wintypes.LPVOID, ctypes.POINTER(wintypes.LPWSTR)]
+    advapi32.ConvertSidToStringSidW.restype = wintypes.BOOL
+    kernel32.LocalFree.argtypes = [wintypes.LPVOID]
+    kernel32.LocalFree.restype = wintypes.LPVOID
+    needed = wintypes.DWORD()
+    advapi32.GetFileSecurityW(str(path), 1, None, 0, ctypes.byref(needed))
+    if ctypes.get_last_error() != 122 or not needed.value:
+        raise OSError(ctypes.get_last_error(), "Cannot size the Windows journal owner descriptor.")
+    descriptor = ctypes.create_string_buffer(needed.value)
+    if not advapi32.GetFileSecurityW(str(path), 1, descriptor, needed, ctypes.byref(needed)):
+        raise OSError(ctypes.get_last_error(), "Cannot read the Windows journal owner descriptor.")
+    owner, defaulted = wintypes.LPVOID(), wintypes.BOOL()
+    if not advapi32.GetSecurityDescriptorOwner(descriptor, ctypes.byref(owner), ctypes.byref(defaulted)) or not owner:
+        raise OSError(ctypes.get_last_error(), "The Windows journal owner is unavailable.")
+    value = wintypes.LPWSTR()
+    if not advapi32.ConvertSidToStringSidW(owner, ctypes.byref(value)):
+        raise OSError(ctypes.get_last_error(), "Cannot convert the Windows journal owner SID.")
+    try:
+        return value.value
+    finally:
+        kernel32.LocalFree(value)
+
 def _windows_dacl_sids(path):
     """Read the explicit allow ACE SIDs for a path's DACL (testable stdlib helper)."""
     if os.name != "nt":
@@ -78,6 +114,20 @@ def _windows_dacl_sids(path):
                     ("AclBytesFree", wintypes.DWORD)]
     advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi32.GetFileSecurityW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.LPVOID,
+                                          wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+    advapi32.GetFileSecurityW.restype = wintypes.BOOL
+    advapi32.GetSecurityDescriptorDacl.argtypes = [wintypes.LPVOID, ctypes.POINTER(wintypes.BOOL),
+                                                   ctypes.POINTER(wintypes.LPVOID), ctypes.POINTER(wintypes.BOOL)]
+    advapi32.GetSecurityDescriptorDacl.restype = wintypes.BOOL
+    advapi32.GetAclInformation.argtypes = [wintypes.LPVOID, wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD]
+    advapi32.GetAclInformation.restype = wintypes.BOOL
+    advapi32.GetAce.argtypes = [wintypes.LPVOID, wintypes.DWORD, ctypes.POINTER(wintypes.LPVOID)]
+    advapi32.GetAce.restype = wintypes.BOOL
+    advapi32.ConvertSidToStringSidW.argtypes = [wintypes.LPVOID, ctypes.POINTER(wintypes.LPWSTR)]
+    advapi32.ConvertSidToStringSidW.restype = wintypes.BOOL
+    kernel32.LocalFree.argtypes = [wintypes.LPVOID]
+    kernel32.LocalFree.restype = wintypes.LPVOID
     needed = wintypes.DWORD()
     flags = 4
     advapi32.GetFileSecurityW(str(path), flags, None, 0, ctypes.byref(needed))
@@ -124,6 +174,13 @@ def _private_windows_dacl(path):
     sddl = "D:P(A;;FA;;;{})(A;;FA;;;SY)(A;;FA;;;BA)".format(sid)
     advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD,
+                                                                                ctypes.POINTER(wintypes.LPVOID), ctypes.POINTER(wintypes.DWORD)]
+    advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.restype = wintypes.BOOL
+    advapi32.SetFileSecurityW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.LPVOID]
+    advapi32.SetFileSecurityW.restype = wintypes.BOOL
+    kernel32.LocalFree.argtypes = [wintypes.LPVOID]
+    kernel32.LocalFree.restype = wintypes.LPVOID
     descriptor = wintypes.LPVOID()
     if not advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, 1,
                                                                            ctypes.byref(descriptor), None):
@@ -136,6 +193,8 @@ def _private_windows_dacl(path):
         kernel32.LocalFree(descriptor)
     if _windows_dacl_sids(path) != expected:
         raise OSError("The Windows journal DACL retained inherited access.")
+    if _windows_owner_sid(path) != sid:
+        raise OSError("The Windows journal owner differs from the current process user.")
 
 
 def _error(code, message):
