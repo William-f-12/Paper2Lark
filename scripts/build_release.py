@@ -79,7 +79,7 @@ def build_release(output=None):
     for host, filename in zip(HOSTS, filenames):
         marketplace = ROOT / 'dist' / host
         files = {name: (marketplace / name).read_bytes() for name in members(host)}
-        files['LICENSE'] = (ROOT / 'LICENSE').read_bytes()
+        files['LICENSE'] = (ROOT / 'LICENSE').read_text(encoding='utf-8').encode('utf-8')
         files['README.md'] = (ROOT / 'docs/installation' / (host + '.md')).read_bytes()
         metadata = json.loads(files['plugins/paper2lark/build-info.json'])
         runtime = files['plugins/paper2lark/runtime.pyz']

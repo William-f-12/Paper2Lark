@@ -45,12 +45,14 @@ Final full regression: **321 tests run, 320 passed, 1 skipped** in 197.850 secon
 | Shared runtime | 88664 |
 | Claude plugin | 105578 |
 | Codex plugin | 106197 |
-| Claude release ZIP | 100467 |
-| Codex release ZIP | 100880 |
+| Claude release ZIP | 100455 |
+| Codex release ZIP | 100868 |
 
 Runtime SHA-256: `b570902e16d123c257f022e1c1fbeeb185b05b00011b029aaed5c3c22dbffb7a`.
 
 The exact archive hashes are recorded in generated `release-info.json` and `SHA256SUMS`; guide edits change ZIP hashes without changing runtime hashes.
+
+Final integration also exposed a pre-existing LICENSE checkout line-ending difference between the main directory and the worktree. The release builder normalizes license text and `.gitattributes` now pins its LF checkout. A dedicated regression verifies byte-identical artifacts for LF/CRLF license inputs. This packaging-only fix does not change the runtime or installed plugin contents. After the fix, 21 release/package tests ran: 20 passed and the same existing symlink-privilege check skipped. Scoped review found no issue; main/worktree archive hashes now match.
 
 ## Release decision
 

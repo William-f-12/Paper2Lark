@@ -135,3 +135,13 @@ class ReleaseTests(unittest.TestCase):
         self.redirect_directory(self.root / 'dist', target)
         self.assertIn('Redirected', self.build(success=False).stderr)
         self.assertEqual(list(target.iterdir()), [])
+
+    def test_license_checkout_line_endings_do_not_change_release_bytes(self):
+        license_path = self.root / 'LICENSE'
+        canonical = license_path.read_text(encoding='utf-8').encode('utf-8')
+        license_path.write_bytes(canonical)
+        self.build()
+        before = {p.name: p.read_bytes() for p in self.output.iterdir()}
+        license_path.write_bytes(canonical.replace(b'\n', b'\r\n'))
+        self.build()
+        self.assertEqual(before, {p.name: p.read_bytes() for p in self.output.iterdir()})
