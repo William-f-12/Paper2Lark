@@ -1,6 +1,6 @@
 """Version-three SQLite identity and publication state; inspection is read-only."""
 import os
-from contextlib import closing
+from contextlib import closing, contextmanager
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -545,44 +545,92 @@ def _paper_uid(value, code='ACTIVE_RUN_INVALID'):
         _state_error(code, 'paper_uid must be a UUID.')
 
 
-def reserve_run(home, library_id, paper_uid, run_id):
+@contextmanager
+def reserving_run(home, library_id, paper_uid, run_id):
     library_id = _library_id(library_id)
     paper_uid = _paper_uid(paper_uid)
     run_id = _run_id(run_id)
-    path = _require_v2(home)
+    path = Path(home) / 'state.sqlite3'
+    if not path.exists():
+        _state_error('STATE_UNINITIALIZED', 'Initialize local state explicitly before writing.')
+    conn = None
     try:
-        with closing(sqlite3.connect(path, timeout=30)) as conn:
-            conn.execute('PRAGMA foreign_keys=ON')
-            conn.execute('BEGIN IMMEDIATE')
-            owner = conn.execute(
-                'SELECT library_id FROM papers WHERE paper_uid=?',
-                (paper_uid,)).fetchone()
-            if owner != (library_id,):
-                _state_error('ACTIVE_RUN_INVALID',
-                             'The paper is not tracked in the selected library.')
-            existing = conn.execute(
-                'SELECT run_id, created_at FROM active_runs '
-                'WHERE library_id=? AND paper_uid=?',
-                (library_id, paper_uid)).fetchone()
-            if existing is not None:
-                if existing[0] != run_id:
-                    _state_error('ACTIVE_RUN_EXISTS',
-                                 f'Active reading run exists: {existing[0]}')
-                conn.commit()
-                return {'library_id': library_id, 'paper_uid': paper_uid,
-                        'run_id': existing[0], 'created_at': existing[1]}
+        conn = sqlite3.connect(path, timeout=30)
+        conn.execute('PRAGMA foreign_keys=ON')
+        conn.execute('BEGIN IMMEDIATE')
+        if _version(conn) != 3 or not _v3_tables_valid(conn):
+            _state_error('STATE_UNINITIALIZED', 'Initialize current local state before reading papers.')
+        owner = conn.execute(
+            'SELECT library_id FROM papers WHERE paper_uid=?',
+            (paper_uid,)).fetchone()
+        if owner != (library_id,):
+            _state_error('ACTIVE_RUN_INVALID',
+                         'The paper is not tracked in the selected library.')
+        existing = conn.execute(
+            'SELECT run_id, created_at FROM active_runs '
+            'WHERE library_id=? AND paper_uid=?',
+            (library_id, paper_uid)).fetchone()
+        if existing is not None:
+            if existing[0] != run_id:
+                _state_error('ACTIVE_RUN_EXISTS',
+                             f'Active reading run exists: {existing[0]}')
+            reservation = {'library_id': library_id, 'paper_uid': paper_uid,
+                           'run_id': existing[0], 'created_at': existing[1]}
+        else:
             created_at = _now()
             conn.execute(
                 'INSERT INTO active_runs(library_id, paper_uid, run_id, created_at) '
                 'VALUES (?, ?, ?, ?)',
                 (library_id, paper_uid, run_id, created_at))
-            conn.commit()
-            return {'library_id': library_id, 'paper_uid': paper_uid,
-                    'run_id': run_id, 'created_at': created_at}
-    except (sqlite3.Error, Paper2LarkError) as error:
-        if isinstance(error, Paper2LarkError):
-            raise
-        _state_error('STATE_INVALID', 'Cannot reserve an active reading run.')
+            reservation = {'library_id': library_id, 'paper_uid': paper_uid,
+                           'run_id': run_id, 'created_at': created_at}
+        yield reservation
+        conn.commit()
+    except BaseException as error:
+        if conn is not None:
+            conn.rollback()
+        if isinstance(error, sqlite3.Error):
+            _state_error('STATE_INVALID', 'Cannot reserve an active reading run.')
+        raise
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def reserve_run(home, library_id, paper_uid, run_id):
+    with reserving_run(home, library_id, paper_uid, run_id) as reservation:
+        return reservation
+
+
+def get_run_reservation(home, run_id):
+    run_id = _run_id(run_id)
+    path = _require_v2(home)
+    try:
+        with closing(sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True)) as conn:
+            row = conn.execute(
+                'SELECT a.library_id, a.paper_uid, a.run_id, a.created_at, '
+                'l.binding_digest, l.base_token, l.table_id '
+                'FROM active_runs a JOIN libraries l ON l.library_id=a.library_id '
+                'WHERE a.run_id=?', (run_id,)).fetchone()
+            if row is None:
+                return None
+            return {'library_id': row[0], 'paper_uid': row[1], 'run_id': row[2],
+                    'created_at': row[3], 'binding_digest': row[4],
+                    'base_token': row[5], 'table_id': row[6]}
+    except sqlite3.Error:
+        _state_error('STATE_INVALID', 'Cannot inspect a reading run reservation.')
+
+
+def has_publication_operations(home, run_id):
+    run_id = _run_id(run_id)
+    path = _require_v2(home)
+    try:
+        with closing(sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True)) as conn:
+            return conn.execute(
+                'SELECT 1 FROM operations WHERE run_id=? LIMIT 1',
+                (run_id,)).fetchone() is not None
+    except sqlite3.Error:
+        _state_error('STATE_INVALID', 'Cannot inspect publication evidence.')
 
 
 def get_active_run(home, library_id, paper_uid):

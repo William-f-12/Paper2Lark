@@ -11,6 +11,7 @@ from .errors import Paper2LarkError
 from .identity import normalize_source
 from .jsonutil import loads as strict_json_loads
 from .keywords import reconcile_keywords
+from .locking import library_lock
 from .bindings import assert_account, check_binding, fetch_fields, nested_object, validate_binding
 from .runs import (MAX_ARTIFACT_BYTES, create_run, load_run, transition_run, verify_run_artifacts,
                    write_artifact, write_text_artifact, run_lock)
@@ -484,25 +485,22 @@ def prepare_read(home, binding, settings, request, runner, gateway):
                   str(uuid.uuid5(uuid.NAMESPACE_URL,
                                  f"paper2lark:{binding['library_id']}:{identity_seed}")))
     run_id = str(uuid.uuid4())
-    reserved = False
     if request.get('persist_to_library'):
         if tracked is None:
             raise Paper2LarkError(
                 'PAPER_NOT_TRACKED',
                 'Persistent reading requires the existing record in initialized local state.')
-        state.reserve_run(home, binding['library_id'], paper_uid, run_id)
-        reserved = True
-    try:
+        with library_lock(home, binding['library_id']):
+            with state.reserving_run(home, binding['library_id'], paper_uid, run_id):
+                run = create_run(
+                    Path(home), request, template, handoff,
+                    paper_uid=paper_uid, run_id=run_id)
+                verify_run_artifacts(Path(run['run_dir']), run)
+    else:
         run = create_run(
             Path(home), request, template, handoff,
             paper_uid=paper_uid, run_id=run_id)
-    except Exception:
-        if reserved:
-            try:
-                state.release_run(home, binding['library_id'], paper_uid, run_id)
-            except Paper2LarkError:
-                pass
-        raise
+        verify_run_artifacts(Path(run['run_dir']), run)
     stored_handoff = _artifact_json(run, 'handoff')
     return {'run_id': run['run_id'], 'run_dir': run['run_dir'], 'status': run['status'],
             'missing_work': handoff['missing_work'], 'vocabulary': vocabulary,

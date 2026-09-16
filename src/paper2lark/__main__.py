@@ -18,6 +18,7 @@ from .papers import collect_paper, query_papers, update_paper, validate_query_re
 from .publishing import (apply_publication, cancel_run, plan_publication,
                          resume_publication)
 from .reading import (prepare_read, show_run, submit_read, validate_read_request)
+from .runs import repair_reservation
 from .provisioning import Provisioner
 from .setup import plan_setup, apply_setup, show_setup, cancel_setup
 from .sources import ingest_source, validate_source_input
@@ -83,6 +84,10 @@ def parser():
     cancel = run_actions.add_parser(
         'cancel', help='Explicitly release a persistent run while retaining artifacts')
     cancel.add_argument('--run', required=True)
+    repair = run_actions.add_parser(
+        'repair-reservation', help='Preview or release a local initialization orphan')
+    repair.add_argument('--run', required=True)
+    repair.add_argument('--apply', action='store_true')
     publishing = commands.add_parser('publish', help='Plan or apply verified Wiki publication')
     publish_actions = publishing.add_subparsers(dest='action', required=True)
     publish_plan = publish_actions.add_parser('plan', help='Create an immutable read-only publication plan')
@@ -235,12 +240,15 @@ def execute(args):
     if args.command == 'runs':
         if args.action == 'resume':
             return resume_publication(home, args.run), 0
-        if args.action == 'cancel':
+        if args.action in {'cancel', 'repair-reservation'}:
             binding = load_binding(home, profile)
             if binding is None:
                 raise Paper2LarkError(
                     'BINDING_MISSING', 'No existing library is bound to this profile.')
-            return cancel_run(home, binding, args.run), 0
+            if args.action == 'cancel':
+                return cancel_run(home, binding, args.run), 0
+            require_apply_state(home)
+            return repair_reservation(home, binding, args.run, apply=args.apply), 0
         return show_run(home, args.run), 0
     if args.command == 'publish':
         require_apply_state(home)

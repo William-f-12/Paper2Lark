@@ -9,9 +9,11 @@ import tempfile
 from datetime import datetime, timezone
 import uuid
 
+from . import state
+from .bindings import digest, validate_binding
 from .errors import Paper2LarkError
 from .jsonutil import loads as strict_json_loads
-from .locking import exclusive
+from .locking import exclusive, library_lock
 
 
 MAX_ARTIFACT_BYTES = 4 * 1024 * 1024
@@ -288,6 +290,92 @@ def verify_run_artifacts(run_dir, manifest):
                 or hashlib.sha256(payload).hexdigest() != descriptor['sha256']):
             _error('RUN_INVALID', 'A run artifact changed unexpectedly.')
     return manifest
+
+
+def _reservation_repair_inspection(home, binding, run_id, reservation):
+    expected = (binding['library_id'], digest(binding), binding['base_token'], binding['table_id'])
+    actual = (reservation['library_id'], reservation['binding_digest'],
+              reservation['base_token'], reservation['table_id'])
+    if actual != expected:
+        _error('BINDING_CONFLICT',
+               'The active run reservation belongs to another bound library or profile target.')
+    root = Path(home).resolve()
+    run_dir = root / 'runs' / run_id
+    try:
+        redirected = run_dir.is_symlink() or run_dir.resolve() != run_dir
+    except (OSError, RuntimeError):
+        redirected = True
+    if redirected:
+        return 'UNSAFE_RUN_PATH', False
+    if state.has_publication_operations(home, run_id):
+        return 'PUBLICATION_EVIDENCE', False
+    if not run_dir.exists():
+        return 'INITIALIZATION_ORPHAN', True
+    if not run_dir.is_dir():
+        return 'UNSAFE_RUN_PATH', False
+    try:
+        children = list(run_dir.iterdir())
+        if any(child.is_symlink() for child in children):
+            return 'UNSAFE_RUN_PATH', False
+    except OSError:
+        return 'UNSAFE_RUN_PATH', False
+    publication_evidence = {
+        'publication-plan.json', 'publication.md', 'publication-result.json'}
+    progress_evidence = {
+        'source.json', 'role-map.json', 'analysis.json', 'note-plan.json',
+        'draft.md', 'verification.json'}
+    names = {child.name for child in children}
+    if names & publication_evidence:
+        return 'PUBLICATION_EVIDENCE', False
+    if names & progress_evidence:
+        return 'RUN_ESTABLISHED', False
+    if 'run.json' in names:
+        try:
+            loaded_dir, run = load_run(home, run_id)
+            verify_run_artifacts(loaded_dir, run)
+        except Paper2LarkError:
+            return 'RUN_CORRUPT', False
+        return 'RUN_RESUMABLE', False
+    return 'INITIALIZATION_ORPHAN', True
+
+
+def _repair_next_action(reason, run_id, released=False):
+    if released or reason == 'NO_ACTIVE_RESERVATION':
+        return 'none'
+    if reason == 'RUN_RESUMABLE':
+        return (f'runs resume --run {run_id} or runs cancel --run {run_id}')
+    if reason == 'INITIALIZATION_ORPHAN':
+        return f'runs repair-reservation --run {run_id} --apply'
+    return 'inspect retained local state; do not release the reservation'
+
+
+def repair_reservation(home, binding, run_id, apply=False):
+    """Preview or release only a proven local initialization orphan."""
+    validate_binding(binding)
+    if type(apply) is not bool:
+        _error('RESERVATION_REPAIR_INVALID', 'Repair apply must be a boolean.')
+    with library_lock(home, binding['library_id']):
+        current = state.get_run_reservation(home, run_id)
+        if current is None:
+            return {'run_id': run_id, 'repairable': False,
+                    'reason': 'NO_ACTIVE_RESERVATION', 'reservation_released': False,
+                    'artifacts_retained': True, 'local_mutations': False,
+                    'next_action': 'none', 'remote_mutations': False}
+        reason, repairable = _reservation_repair_inspection(
+            home, binding, run_id, current)
+        if apply and not repairable:
+            _error('RESERVATION_REPAIR_BLOCKED',
+                   'Only a proven incomplete initialization reservation can be released.')
+        released = False
+        if apply:
+            released = state.release_run(
+                home, current['library_id'], current['paper_uid'], run_id)['released']
+        return {'run_id': run_id, 'library_id': current['library_id'],
+                'paper_uid': current['paper_uid'], 'repairable': repairable,
+                'reason': reason, 'reservation_released': released,
+                'artifacts_retained': True, 'local_mutations': released,
+                'next_action': _repair_next_action(reason, run_id, released),
+                'remote_mutations': False}
 
 
 def run_lock(home, run_id):
