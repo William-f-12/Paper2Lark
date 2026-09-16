@@ -10,6 +10,9 @@ import tempfile
 import unittest
 import zipfile
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
+from paper2lark.runs import create_run
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -92,7 +95,7 @@ class PackageTests(unittest.TestCase):
             'paper2lark/doctor.py', 'paper2lark/contracts.py', 'paper2lark/locking.py',
             'paper2lark/identity.py', 'paper2lark/keywords.py', 'paper2lark/collection_journal.py', 'paper2lark/base.py',
             'paper2lark/papers.py', 'paper2lark/runs.py', 'paper2lark/sources.py',
-            'paper2lark/templates.py', 'paper2lark/reading.py',
+            'paper2lark/pdf_tokens.py', 'paper2lark/templates.py', 'paper2lark/reading.py',
             'paper2lark/documents.py', 'paper2lark/publishing.py',
             'paper2lark/setup.py', 'paper2lark/setup_assets.py',
             'paper2lark/provisioning.py', 'paper2lark/keywords.en.json',
@@ -111,6 +114,44 @@ class PackageTests(unittest.TestCase):
                         roots.add(node.module.split('.')[0])
                 self.assertLessEqual(roots, set(sys.stdlib_module_names) | {'paper2lark'}, name)
 
+    def test_bundled_launcher_ingests_pdf_tokens_in_source_order(self):
+        with tempfile.TemporaryDirectory(prefix='p2l-packaged-pdf-') as folder:
+            base = Path(folder)
+            home = base / 'home'
+            request = {'schema_version': 1, 'persist_to_library': False,
+                       'requested_depth': 'quick', 'reader_preference': 'builtin',
+                       'force_reread': False, 'record_id': 'recPackagedPdf'}
+            template = {'schema_version': 1, 'document_id': 'doc',
+                        'revision_id': '1', 'content_digest': 'b' * 64,
+                        'raw_content': '# Notes', 'blocks': []}
+            run = create_run(home, request, template,
+                             {'schema_version': 1, 'missing_work': ['source_bundle']})
+            content = b'BT [(Accuracy ) <3935> ( percent)] TJ ET'
+            pdf = base / 'paper.pdf'
+            pdf.write_bytes(
+                b'%PDF-1.4\n3 0 obj\n<< /Type /Catalog /Pages 4 0 R >>\nendobj\n'
+                b'4 0 obj\n<< /Type /Pages /Kids [1 0 R] /Count 1 >>\nendobj\n'
+                b'1 0 obj\n<< /Type /Page /Parent 4 0 R /Contents 2 0 R >>\nendobj\n'
+                b'2 0 obj\n<< /Length ' + str(len(content)).encode() +
+                b' >>\nstream\n' + content + b'\nendstream\nendobj\n%%EOF\n')
+            source_input = base / 'source.json'
+            source_input.write_text(json.dumps({
+                'schema_version': 1, 'kind': 'pdf', 'path': str(pdf),
+                'original_location': 'packaged fixture', 'metadata': {},
+            }), encoding='utf-8')
+            package = ROOT / 'dist/codex/plugins/paper2lark'
+            result = subprocess.run([
+                sys.executable, str(package / 'scripts/paper2lark.py'),
+                '--home', str(home), 'sources', 'ingest', '--run', run['run_id'],
+                '--input', str(source_input),
+            ], cwd=base, capture_output=True, text=True, encoding='utf-8')
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            response = json.loads(result.stdout)
+            run_dir = home / 'runs' / run['run_id']
+            source = json.loads((run_dir / 'source.json').read_text(encoding='utf-8'))
+            extracted = (run_dir / source['sections'][0]['text_path']).read_text(
+                encoding='utf-8')
+            self.assertEqual(extracted.strip(), 'Accuracy 95 percent')
     def test_build_info_has_exact_fixed_point_metrics_for_both_hosts(self):
         packages = {host: ROOT / 'dist' / host / 'plugins/paper2lark'
                     for host in ('claude', 'codex')}

@@ -43,7 +43,7 @@ def build():
         for name in ('__init__.py', '__main__.py', 'errors.py', 'jsonutil.py', 'config.py',
                      'state.py', 'lark.py', 'bindings.py', 'doctor.py', 'contracts.py',
                      'locking.py', 'identity.py', 'keywords.py', 'collection_journal.py', 'base.py', 'papers.py',
-                     'runs.py', 'sources.py', 'templates.py', 'reading.py',
+                     'runs.py', 'sources.py', 'pdf_tokens.py', 'templates.py', 'reading.py',
                      'documents.py', 'publishing.py', 'setup.py', 'setup_assets.py',
                      'provisioning.py', 'keywords.en.json'):
             files['paper2lark/' + name] = (ROOT / 'src/paper2lark' / name).read_bytes()

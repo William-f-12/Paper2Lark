@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 import zlib
 
 import sys
@@ -10,8 +11,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 
 from paper2lark.errors import Paper2LarkError
 from paper2lark.runs import create_run, load_run
-from paper2lark.sources import (MAX_SECTIONS, ingest_source, validate_source_bundle,
-                                validate_source_input)
+from paper2lark.sources import (MAX_SECTIONS, _ordered_page_objects, ingest_source,
+                                validate_source_bundle, validate_source_input)
 
 
 def pdf_bytes(text=None, compressed=False):
@@ -51,6 +52,42 @@ def blank_first_page_pdf():
 
 
 class SourceIngestionTests(unittest.TestCase):
+    def test_iterative_page_tree_preserves_order_and_rejects_bad_graphs(self):
+        valid = {
+            1: b'<< /Type /Page >>', 2: b'<< /Type /Page >>',
+            3: b'<< /Type /Pages /Kids [2 0 R 1 0 R] >>',
+            4: b'<< /Type /Catalog /Pages 3 0 R >>',
+        }
+        self.assertEqual(_ordered_page_objects(valid), [2, 1])
+        with mock.patch('paper2lark.sources.MAX_PDF_TREE_NODES', 2):
+            with self.assertRaises(Paper2LarkError) as raised:
+                _ordered_page_objects(valid)
+        self.assertEqual(raised.exception.code, 'SOURCE_TOO_COMPLEX')
+
+        cycle = {
+            1: b'<< /Type /Pages /Kids [2 0 R] >>',
+            2: b'<< /Type /Pages /Kids [1 0 R] >>',
+            3: b'<< /Type /Catalog /Pages 1 0 R >>',
+        }
+        duplicate = {
+            1: b'<< /Type /Page >>',
+            2: b'<< /Type /Pages /Kids [1 0 R 1 0 R] >>',
+            3: b'<< /Type /Catalog /Pages 2 0 R >>',
+        }
+        for objects in (cycle, duplicate):
+            with self.subTest(objects=objects), self.assertRaises(Paper2LarkError) as raised:
+                _ordered_page_objects(objects)
+            self.assertEqual(raised.exception.code, 'PDF_UNSUPPORTED')
+
+    def test_deep_page_tree_returns_structured_complexity_error(self):
+        objects = {1: b'<< /Type /Page >>'}
+        for number in range(2, 1102):
+            objects[number] = (b'<< /Type /Pages /Kids ['
+                               + str(number - 1).encode() + b' 0 R] >>')
+        objects[1102] = b'<< /Type /Catalog /Pages 1101 0 R >>'
+        with self.assertRaises(Paper2LarkError) as raised:
+            _ordered_page_objects(objects)
+        self.assertEqual(raised.exception.code, 'SOURCE_TOO_COMPLEX')
     def test_malformed_source_enums_return_contract_errors(self):
         path = self.root / 'source.txt'
         path.write_text('Synthetic source.', encoding='utf-8')
@@ -180,6 +217,12 @@ class SourceIngestionTests(unittest.TestCase):
             ingest_source(self.home, self.run['run_id'],
                           validate_source_input(self.input('pdf', scanned), self.root))
         self.assertEqual(raised.exception.code, 'PDF_TEXT_UNAVAILABLE')
+        malformed = self.root / 'malformed.pdf'
+        malformed.write_bytes(pdf_bytes(b'Broken (nested'))
+        with self.assertRaises(Paper2LarkError) as raised:
+            ingest_source(self.home, self.run['run_id'],
+                          validate_source_input(self.input('pdf', malformed), self.root))
+        self.assertEqual(raised.exception.code, 'PDF_UNSUPPORTED')
         _, manifest = load_run(self.home, self.run['run_id'])
         self.assertEqual(manifest['status'], 'awaiting_source')
         for value in (

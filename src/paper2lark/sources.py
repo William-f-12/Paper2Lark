@@ -10,12 +10,15 @@ import tempfile
 import zlib
 
 from .errors import Paper2LarkError
+from .pdf_tokens import extract_text as _extract_pdf_text
 from .runs import load_run, transition_run, write_artifact
 
 
 MAX_SOURCE_BYTES = 32 * 1024 * 1024
 MAX_EXTRACTED_BYTES = 16 * 1024 * 1024
 MAX_SECTIONS = 10_000
+MAX_PDF_TREE_DEPTH = 256
+MAX_PDF_TREE_NODES = 100_000
 COMPONENTS = ('main_text', 'appendix', 'figures', 'tables', 'supplementary')
 STATUSES = {'complete', 'partial', 'unavailable', 'not_applicable'}
 _DIGEST = re.compile(r'[0-9a-f]{64}\Z')
@@ -100,107 +103,8 @@ def _atomic_bytes(path, payload):
                 pass
 
 
-def _pdf_literal(raw):
-    result = bytearray()
-    index = 0
-    escapes = {ord('n'): 10, ord('r'): 13, ord('t'): 9, ord('b'): 8, ord('f'): 12}
-    while index < len(raw):
-        byte = raw[index]
-        if byte != 92:
-            result.append(byte)
-            index += 1
-            continue
-        index += 1
-        if index >= len(raw):
-            break
-        byte = raw[index]
-        if byte in (10, 13):
-            if byte == 13 and index + 1 < len(raw) and raw[index + 1] == 10:
-                index += 1
-            index += 1
-            continue
-        if 48 <= byte <= 55:
-            digits = bytes([byte])
-            index += 1
-            for _ in range(2):
-                if index < len(raw) and 48 <= raw[index] <= 55:
-                    digits += bytes([raw[index]])
-                    index += 1
-                else:
-                    break
-            result.append(int(digits, 8) & 255)
-            continue
-        result.append(escapes.get(byte, byte))
-        index += 1
-    data = bytes(result)
-    if data.startswith((b'\xfe\xff', b'\xff\xfe')):
-        try:
-            return data.decode('utf-16')
-        except UnicodeError:
-            pass
-    return data.decode('latin-1', errors='replace')
-
-
-def _literal_strings(data):
-    strings = []
-    index = 0
-    while index < len(data):
-        if data[index] != 40:
-            index += 1
-            continue
-        depth = 1
-        escaped = False
-        index += 1
-        start = index
-        value = bytearray()
-        while index < len(data) and depth:
-            byte = data[index]
-            if escaped:
-                value.extend((92, byte))
-                escaped = False
-            elif byte == 92:
-                escaped = True
-            elif byte == 40:
-                depth += 1
-                value.append(byte)
-            elif byte == 41:
-                depth -= 1
-                if depth:
-                    value.append(byte)
-            else:
-                value.append(byte)
-            index += 1
-        if depth == 0:
-            strings.append(_pdf_literal(bytes(value)))
-        elif start < len(data):
-            break
-    return strings
-
-
-def _decode_hex(raw):
-    compact = re.sub(rb'\s+', b'', raw)
-    if len(compact) % 2:
-        compact += b'0'
-    try:
-        data = bytes.fromhex(compact.decode('ascii'))
-    except (ValueError, UnicodeError):
-        return ''
-    if data.startswith((b'\xfe\xff', b'\xff\xfe')):
-        try:
-            return data.decode('utf-16')
-        except UnicodeError:
-            pass
-    return data.decode('latin-1', errors='replace')
-
-
 def _content_text(data):
-    parts = []
-    for block in re.findall(rb'BT(.*?)ET', data, re.DOTALL):
-        parts.extend(_literal_strings(block))
-        parts.extend(_decode_hex(raw) for raw in re.findall(rb'(?<!<)<([0-9A-Fa-f\s]+)>(?!>)', block))
-    text = ' '.join(part.strip() for part in parts if part.strip())
-    text = re.sub(r'[ \t\f\v]+', ' ', text)
-    return text.strip()
+    return _extract_pdf_text(data)
 
 
 def _ordered_page_objects(objects):
@@ -212,39 +116,49 @@ def _ordered_page_objects(objects):
     if root is None:
         return None
     ordered = []
-    visiting = set()
+    active = set()
     visited = set()
-
-    def visit(number):
-        if number in visiting or number in visited or number not in objects:
-            return False
-        visiting.add(number)
-        body = objects[number]
+    entered = 0
+    stack = [(int(root.group(1)), 0, False)]
+    while stack:
+        number, depth, leaving = stack.pop()
+        if leaving:
+            active.remove(number)
+            visited.add(number)
+            continue
+        if depth > MAX_PDF_TREE_DEPTH:
+            _error('SOURCE_TOO_COMPLEX', 'PDF page-tree depth exceeds the safety limit.')
+        if number in active:
+            _error('PDF_UNSUPPORTED', 'The PDF page tree contains a cycle.')
+        if number in visited:
+            _error('PDF_UNSUPPORTED', 'The PDF page tree contains a duplicate node.')
+        body = objects.get(number)
+        if body is None:
+            _error('PDF_UNSUPPORTED', 'The PDF page tree references a missing object.')
+        entered += 1
+        if entered > MAX_PDF_TREE_NODES:
+            _error('SOURCE_TOO_COMPLEX', 'PDF page-tree nodes exceed the safety limit.')
+        active.add(number)
         if re.search(rb'/Type\s*/Page\b', body):
             if len(ordered) >= MAX_SECTIONS:
-                visiting.remove(number)
-                return False
+                _error('SOURCE_TOO_COMPLEX',
+                       'Source contains more than 10,000 sections or pages.')
             ordered.append(number)
-            visiting.remove(number)
+            active.remove(number)
             visited.add(number)
-            return True
+            continue
         if re.search(rb'/Type\s*/Pages\b', body) is None:
-            visiting.remove(number)
-            return False
+            _error('PDF_UNSUPPORTED', 'The PDF page tree contains a non-page node.')
         kids = re.search(rb'/Kids\s*\[(.*?)\]', body, re.DOTALL)
         references = ([] if kids is None else
-                      [int(item) for item in re.findall(rb'(\d+)\s+\d+\s+R', kids.group(1))])
-        if not references or len(ordered) + len(references) > MAX_SECTIONS:
-            visiting.remove(number)
-            return False
-        valid = all(visit(reference) for reference in references)
-        visiting.remove(number)
-        if valid:
-            visited.add(number)
-        return valid
-
-    return ordered if visit(int(root.group(1))) and ordered else None
-
+                      [int(item) for item in
+                       re.findall(rb'(\d+)\s+\d+\s+R', kids.group(1))])
+        if not references:
+            _error('PDF_UNSUPPORTED', 'A PDF page-tree node has no valid children.')
+        stack.append((number, depth, True))
+        stack.extend((reference, depth + 1, False)
+                     for reference in reversed(references))
+    return ordered or None
 
 def _pdf_pages(payload):
     if not payload.startswith(b'%PDF-') or b'/Encrypt' in payload:
