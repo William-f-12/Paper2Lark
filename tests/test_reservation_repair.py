@@ -181,6 +181,10 @@ class ReservationRepairTests(unittest.TestCase):
         run_dir.mkdir(parents=True)
         partial = run_dir / 'request.json'
         partial.write_text('{}\n', encoding='utf-8')
+        assets = run_dir / 'assets'
+        sections = run_dir / 'sections'
+        assets.mkdir()
+        sections.mkdir()
         preview = repair_reservation(
             self.home, self.binding, run_id, apply=False)
         self.assertTrue(preview['repairable'])
@@ -189,6 +193,8 @@ class ReservationRepairTests(unittest.TestCase):
         self.assertTrue(applied['reservation_released'])
         self.assertTrue(applied['local_mutations'])
         self.assertTrue(partial.exists())
+        self.assertTrue(assets.is_dir())
+        self.assertTrue(sections.is_dir())
         repeated = repair_reservation(self.home, self.binding, run_id, apply=True)
         self.assertFalse(repeated['reservation_released'])
         self.assertFalse(repeated['local_mutations'])
@@ -272,6 +278,41 @@ class ReservationRepairTests(unittest.TestCase):
             repair_reservation(self.home, self.binding, unsafe_id, apply=True)
         self.assertEqual(raised.exception.code, 'RESERVATION_REPAIR_BLOCKED')
 
+    def test_repair_blocks_unknown_or_future_initialization_artifacts(self):
+        for name, directory in (('publication-intent.json', False),
+                                ('future-runtime-state', True)):
+            with self.subTest(name=name):
+                run_id = self._run_id()
+                state.reserve_run(
+                    self.home, self.library, self.paper['paper_uid'], run_id)
+                try:
+                    run_dir = self.home / 'runs' / run_id
+                    run_dir.mkdir(parents=True)
+                    artifact = run_dir / name
+                    if directory:
+                        artifact.mkdir()
+                    else:
+                        artifact.write_text('{}\n', encoding='utf-8')
+                    preview = repair_reservation(
+                        self.home, self.binding, run_id, apply=False)
+                    self.assertFalse(preview['repairable'])
+                    self.assertEqual(preview['reason'], 'UNKNOWN_RUN_ARTIFACT')
+                    with self.assertRaises(Paper2LarkError) as raised:
+                        repair_reservation(
+                            self.home, self.binding, run_id, apply=True)
+                    self.assertEqual(
+                        raised.exception.code, 'RESERVATION_REPAIR_BLOCKED')
+                    self.assertEqual(state.get_active_run(
+                        self.home, self.library,
+                        self.paper['paper_uid'])['run_id'], run_id)
+                    self.assertTrue(artifact.exists())
+                finally:
+                    active = state.get_active_run(
+                        self.home, self.library, self.paper['paper_uid'])
+                    if active is not None and active['run_id'] == run_id:
+                        state.release_run(
+                            self.home, self.library,
+                            self.paper['paper_uid'], run_id)
 
 if __name__ == '__main__':
     multiprocessing.freeze_support()

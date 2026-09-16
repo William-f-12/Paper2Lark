@@ -26,6 +26,8 @@ JSON_ARTIFACTS = {
     'publication-plan.json', 'publication-result.json',
 }
 TEXT_ARTIFACTS = {'draft.md', 'publication.md'}
+_INITIALIZATION_FILES = {'request.json', 'template.json', 'handoff.json'}
+_INITIALIZATION_DIRECTORIES = {'assets', 'sections'}
 TRANSITIONS = {
     'awaiting_source': {'awaiting_agent', 'canceled'},
     'awaiting_agent': {'submitting', 'canceled'},
@@ -336,6 +338,18 @@ def _reservation_repair_inspection(home, binding, run_id, reservation):
         except Paper2LarkError:
             return 'RUN_CORRUPT', False
         return 'RUN_RESUMABLE', False
+    allowed = _INITIALIZATION_FILES | _INITIALIZATION_DIRECTORIES
+    if names - allowed:
+        return 'UNKNOWN_RUN_ARTIFACT', False
+    try:
+        for child in children:
+            if child.name in _INITIALIZATION_FILES and not child.is_file():
+                return 'INITIALIZATION_STATE_INVALID', False
+            if child.name in _INITIALIZATION_DIRECTORIES:
+                if not child.is_dir() or any(child.iterdir()):
+                    return 'INITIALIZATION_STATE_INVALID', False
+    except OSError:
+        return 'UNSAFE_RUN_PATH', False
     return 'INITIALIZATION_ORPHAN', True
 
 
