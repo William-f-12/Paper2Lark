@@ -12,7 +12,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 from paper2lark.errors import Paper2LarkError
 from paper2lark.runs import create_run, load_run
 from paper2lark.sources import (MAX_SECTIONS, _ordered_page_objects,
-                                _pdf_generation_number, _pdf_object_number,
+                                _pdf_generation_number, _pdf_key_tail,
+                                _pdf_object_number,
                                 ingest_source,
                                 validate_source_bundle, validate_source_input)
 
@@ -100,6 +101,36 @@ def nested_dictionary_pdf():
             b'6 0 obj\n<< /Metadata << /Length 1 >> /Length ' + str(len(logical_first)).encode()
             + b' >>\nstream\n' + logical_first + b'\nendstream\nendobj\n'
             b'trailer\n<< /Info << /Root 8 0 R >> /Root 3 0 R >>\n%%EOF\n')
+
+
+def object_position_pdf():
+    object_first = b'BT (Object Value First) Tj ET'
+    logical_first = b'BT (Object Value Logical) Tj ET'
+
+    def stream(number, content):
+        return (str(number).encode() + b' 0 obj\n'
+                b'<< /Note (/Length 77 /Type /Page) % /Length 66\n'
+                b'/Meta [/Length 99 << /Length 88 >> 7 0 R] '
+                b'/Length ' + str(len(content)).encode() + b' >>\nstream\n'
+                + content + b'\nendstream\nendobj\n')
+
+    return (b'%PDF-1.4\n'
+            b'3 0 obj\n<< /Alias /Type '
+            b'/Meta [/Pages 99 0 R << /Root 9 0 R >> /Pages true false null '
+            b'-2 3.5 (text /Type /Length) <2f>] '
+            b'/Type /Catalog /Pages 4 0 R >>\nendobj\n'
+            b'4 0 obj\n<< /Alias /Type '
+            b'/Meta [/Kids 9 0 R << /Contents 8 0 R >> /Kids] '
+            b'/Type /Pages /Kids [2 0 R 1 0 R] /Count 2 >>\nendobj\n'
+            b'1 0 obj\n<< /Alias /Type '
+            b'/Meta [/Contents 8 0 R << /Type /Catalog >> /Contents] '
+            b'/Type /Page /Parent 4 0 R /Contents 5 0 R >>\nendobj\n'
+            b'2 0 obj\n<< /Alias /Type '
+            b'/Meta [/Contents 8 0 R << /Type /Pages >> /Contents] '
+            b'/Type /Page /Parent 4 0 R /Contents 6 0 R >>\nendobj\n'
+            + stream(5, object_first) + stream(6, logical_first)
+            + b'trailer\n<< /Meta [/Root 9 0 R << /Root 8 0 R >> /Root] '
+            b'/Root 3 0 R >>\n%%EOF\n')
 
 
 def stream_length_pdf(length, content=b'BT (valid stream content) Tj ET',
@@ -193,6 +224,59 @@ class SourceIngestionTests(unittest.TestCase):
         self.assertEqual([section['locator']['value'] for section in bundle['sections']],
                          ['1', '2'])
         self.assertNotIn('PDF_PAGE_ORDER_UNVERIFIED', bundle['warnings'])
+
+    def test_dictionary_parser_distinguishes_keys_from_complete_values(self):
+        paper = self.root / 'object-positions.pdf'
+        paper.write_bytes(object_position_pdf())
+        ingest_source(self.home, self.run['run_id'],
+                      validate_source_input(self.input('pdf', paper), self.root))
+        run_dir, _ = load_run(self.home, self.run['run_id'])
+        bundle = json.loads((run_dir / 'source.json').read_text(encoding='utf-8'))
+        texts = [(run_dir / section['text_path']).read_text(encoding='utf-8').strip()
+                 for section in bundle['sections']]
+        self.assertEqual(texts, ['Object Value Logical', 'Object Value First'])
+        self.assertEqual([section['locator']['value'] for section in bundle['sections']],
+                         ['1', '2'])
+        self.assertNotIn('PDF_PAGE_ORDER_UNVERIFIED', bundle['warnings'])
+
+    def test_dictionary_value_nesting_is_bounded_for_arrays_and_dictionaries(self):
+        for kind in ('array', 'dictionary'):
+            if kind == 'array':
+                accepted = b'[' * 63 + b'null' + b']' * 63
+                rejected = b'[' * 64 + b'null' + b']' * 64
+            else:
+                accepted = b'null'
+                for _ in range(63):
+                    accepted = b'<< /K ' + accepted + b' >>'
+                rejected = b'<< /K ' + accepted + b' >>'
+            with self.subTest(kind=kind, depth=64):
+                tail = _pdf_key_tail(
+                    b'<< /Meta ' + accepted + b' /Type /Page >>', b'Type')
+                self.assertIsNotNone(tail)
+            with self.subTest(kind=kind, depth=65):
+                with self.assertRaises(Paper2LarkError) as raised:
+                    _pdf_key_tail(
+                        b'<< /Meta ' + rejected + b' /Type /Page >>', b'Type')
+                self.assertEqual(raised.exception.code, 'SOURCE_TOO_COMPLEX')
+
+    def test_dictionary_parser_does_not_look_past_a_complete_scalar_value(self):
+        tail = _pdf_key_tail(
+            b'<< /Type /Page /Count 1 >> (unterminated trailing bytes',
+            b'Type')
+        self.assertIsNotNone(tail)
+    def test_dictionary_parser_rejects_malformed_complete_values(self):
+        fixtures = (
+            b'<< /Meta [1 0 R /Type /Page >>',
+            b'<< /Meta << /K 1 >> /Type /Page',
+            b'<< /Meta [<< /K 1 >> 2 0 R] /Type >>',
+            b'<< /Meta ] /Type /Page >>',
+            b'<< /Meta << /K >> /Type /Page >>',
+        )
+        for index, payload in enumerate(fixtures):
+            with self.subTest(index=index):
+                with self.assertRaises(Paper2LarkError) as raised:
+                    _pdf_key_tail(payload, b'Type')
+                self.assertEqual(raised.exception.code, 'PDF_UNSUPPORTED')
 
     def test_stream_length_keeps_embedded_structural_markers_opaque(self):
         content = (b'BT (Before) Tj ET\nendstream\n9 9 obj\nendobj\n'

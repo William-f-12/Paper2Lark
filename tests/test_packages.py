@@ -168,11 +168,11 @@ class PackageTests(unittest.TestCase):
             b'4 0 obj\r<< /Length 23 >>\rstream\r\n' + content_two
             + b'\r\nendstream\rendobj\r'
             b'5 0 obj\r<< /Type /Pages /Kids [2 % first\r0 R 1 0 R] /Count 2 >>\rendobj\r'
-            b'6 0 obj\r<< /Type /Catalog (fake /Pages 7 0 R) '
+            b'6 0 obj\r<< /Type /Catalog /Note (fake /Pages 7 0 R) '
             b'% /Pages 7 0 R\r/Pages 5 0 R >>\rendobj\r'
             b'7 0 obj\r<< /Type /Pages /Kids [1 0 R 2 0 R] /Count 2 >>\rendobj\r'
             b'8 0 obj\r<< /Type /Catalog /Pages 7 0 R >>\rendobj\r'
-            b'trailer\r<< (/Root 8 0 R) % /Root 8 0 R\r/Root 6 % root ref\r0 R >>\r'
+            b'trailer\r<< /Note (/Root 8 0 R) % /Root 8 0 R\r/Root 6 % root ref\r0 R >>\r'
             b'%%EOF\r')
         with tempfile.TemporaryDirectory(prefix='p2l-packaged-pdf-root-') as folder:
             base = Path(folder)
@@ -223,12 +223,16 @@ class PackageTests(unittest.TestCase):
                    b'BT (After) Tj ET')
         payload = (
             b'%PDF-1.4\n'
-            b'3 0 obj\n<< /Type /Catalog /Pages 4 0 R >>\nendobj\n'
-            b'4 0 obj\n<< /Type /Pages /Kids [1 0 R] /Count 1 >>\nendobj\n'
-            b'1 0 obj\n<< /Type /Page /Parent 4 0 R /Contents 2 0 R >>\nendobj\n'
-            b'2 0 obj\n<< /Length ' + str(len(content)).encode()
-            + b' >>\nstream\n' + content + b'\nendstream\nendobj\n'
-            b'trailer\n<< /Root 3 0 R >>\n%%EOF\n')
+            b'3 0 obj\n<< /Alias /Type /Type /Catalog '
+            b'/Meta [/Pages 9 0 R] /Pages 4 0 R >>\nendobj\n'
+            b'4 0 obj\n<< /Alias /Type /Type /Pages '
+            b'/Meta [/Kids 9 0 R] /Kids [1 0 R] /Count 1 >>\nendobj\n'
+            b'1 0 obj\n<< /Alias /Type /Type /Page /Parent 4 0 R '
+            b'/Meta [/Contents 9 0 R] /Contents 2 0 R >>\nendobj\n'
+            b'2 0 obj\n<< /Meta [/Length 99] /Length '
+            + str(len(content)).encode() + b' >>\nstream\n'
+            + content + b'\nendstream\nendobj\n'
+            b'trailer\n<< /Meta [/Root 9 0 R] /Root 3 0 R >>\n%%EOF\n')
         with tempfile.TemporaryDirectory(prefix='p2l-packaged-pdf-stream-') as folder:
             base = Path(folder)
             home = base / 'home'

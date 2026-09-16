@@ -28,6 +28,8 @@ MAX_PDF_LEXICAL_NESTING = 64
 COMPONENTS = ('main_text', 'appendix', 'figures', 'tables', 'supplementary')
 STATUSES = {'complete', 'partial', 'unavailable', 'not_applicable'}
 _DIGEST = re.compile(r'[0-9a-f]{64}\Z')
+_PDF_SCALAR_NUMBER = re.compile(rb'[+-]?(?:\d+(?:\.\d*)?|\.\d+)\Z')
+_PDF_REFERENCE_INTEGER = re.compile(rb'[+-]?\d+\Z')
 
 
 def _error(code, message):
@@ -234,42 +236,104 @@ def _pdf_reference_prefix(data, index=0, require_boundary=True):
     return number, generation, index
 
 
-def _pdf_key_tail(container, key):
-    target = b'/' + key
-    matches = []
-    index = 0
-    scanned = 0
-    depth = 0
-    saw_dictionary = False
-    while True:
-        token, _, end = _pdf_token_span(container, index)
-        if token is None:
-            if depth:
-                _error('PDF_UNSUPPORTED', 'A PDF dictionary is unterminated.')
-            break
-        scanned += 1
-        if scanned > MAX_PDF_SCAN_TOKENS:
+def _pdf_object_token(data, index, state):
+    token, start, end = _pdf_token_span(data, index)
+    if token is not None:
+        state[0] += 1
+        if state[0] > MAX_PDF_SCAN_TOKENS:
             _error('SOURCE_TOO_COMPLEX', 'PDF token scanning exceeds the safety limit.')
-        if token == b'<<':
-            depth += 1
-            saw_dictionary = True
-            if depth > MAX_PDF_LEXICAL_NESTING:
-                _error('SOURCE_TOO_COMPLEX',
-                       'PDF lexical nesting exceeds the safety limit.')
-        elif token == b'>>':
-            if depth == 0:
-                _error('PDF_UNSUPPORTED', 'A PDF dictionary has an unmatched delimiter.')
-            depth -= 1
-            if depth == 0:
-                break
-        elif token == b'stream' and depth == 0:
-            break
-        elif token == target and depth == 1:
-            matches.append(end)
+        if end <= index:
+            _error('PDF_UNSUPPORTED', 'A PDF object parser made no progress.')
+    return token, start, end
+
+
+def _pdf_skip_array(data, index, nesting, state):
+    if nesting > MAX_PDF_LEXICAL_NESTING:
+        _error('SOURCE_TOO_COMPLEX', 'PDF lexical nesting exceeds the safety limit.')
+    while True:
+        token, _, _ = _pdf_token_span(data, index)
+        if token is None:
+            _error('PDF_UNSUPPORTED', 'A PDF array is unterminated.')
+        if token == b']':
+            _, _, end = _pdf_object_token(data, index, state)
+            return end
+        if token == b'>>':
+            _error('PDF_UNSUPPORTED', 'A PDF array has an unmatched delimiter.')
+        next_index = _pdf_skip_object(data, index, nesting, state)
+        if next_index <= index:
+            _error('PDF_UNSUPPORTED', 'A PDF array value made no progress.')
+        index = next_index
+
+
+def _pdf_skip_dictionary(data, index, nesting, state, target, matches):
+    if nesting > MAX_PDF_LEXICAL_NESTING:
+        _error('SOURCE_TOO_COMPLEX', 'PDF lexical nesting exceeds the safety limit.')
+    while True:
+        token, _, _ = _pdf_token_span(data, index)
+        if token is None:
+            _error('PDF_UNSUPPORTED', 'A PDF dictionary is unterminated.')
+        if token == b'>>':
+            _, _, end = _pdf_object_token(data, index, state)
+            return end
+        if token == b']':
+            _error('PDF_UNSUPPORTED', 'A PDF dictionary has an unmatched delimiter.')
+        key, _, key_end = _pdf_object_token(data, index, state)
+        if not key.startswith(b'/') or len(key) == 1:
+            _error('PDF_UNSUPPORTED', 'A PDF dictionary key is malformed.')
+        if target is not None and key == target:
+            matches.append(key_end)
             if len(matches) > 1:
                 _error('PDF_UNSUPPORTED', 'A PDF dictionary repeats a reference key.')
-        index = end
-    if not saw_dictionary or not matches:
+        value_end = _pdf_skip_object(data, key_end, nesting, state)
+        if value_end <= key_end:
+            _error('PDF_UNSUPPORTED', 'A PDF dictionary value made no progress.')
+        index = value_end
+
+
+def _pdf_skip_object(data, index, nesting, state):
+    token, _, end = _pdf_object_token(data, index, state)
+    if token is None or token in (b']', b'>>'):
+        _error('PDF_UNSUPPORTED', 'A PDF dictionary or array value is missing.')
+    if token == b'[':
+        return _pdf_skip_array(data, end, nesting + 1, state)
+    if token == b'<<':
+        return _pdf_skip_dictionary(
+            data, end, nesting + 1, state, None, None)
+    if token.startswith(b'/'):
+        if len(token) == 1:
+            _error('PDF_UNSUPPORTED', 'A PDF name object is empty.')
+        return end
+    if token.startswith(b'(') or (token.startswith(b'<') and token != b'<<'):
+        return end
+    if token in (b'true', b'false', b'null'):
+        return end
+    if _PDF_SCALAR_NUMBER.fullmatch(token):
+        second, _, second_end = _pdf_token_span(data, end)
+        if (second is not None
+                and _PDF_REFERENCE_INTEGER.fullmatch(second)):
+            third, _, third_end = _pdf_token_span(data, second_end)
+            if third == b'R':
+                _pdf_reference_parts(token, second, third)
+                state[0] += 2
+                if state[0] > MAX_PDF_SCAN_TOKENS:
+                    _error('SOURCE_TOO_COMPLEX',
+                           'PDF token scanning exceeds the safety limit.')
+                return third_end
+        return end
+    _error('PDF_UNSUPPORTED', 'A PDF object value is unsupported or malformed.')
+
+
+def _pdf_key_tail(container, key):
+    target = b'/' + key
+    state = [0]
+    opening, _, index = _pdf_object_token(container, 0, state)
+    if opening is None:
+        return None
+    if opening != b'<<':
+        return None
+    matches = []
+    _pdf_skip_dictionary(container, index, 1, state, target, matches)
+    if not matches:
         return None
     return container[matches[0]:]
 
