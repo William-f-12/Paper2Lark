@@ -170,10 +170,11 @@ class TemplateTests(unittest.TestCase):
                         '<paragraph>Parent.</paragraph><heading>Maybe child</heading>'
                         '<paragraph>Still private.</paragraph><h1>Could be boundary</h1>'
                         '<paragraph>Conservative.</paragraph></doc>')})
-        for item in ambiguous['blocks']:
-            if item['text'] in {'个人笔记（人工填写）', 'Parent.', 'Maybe child',
-                                'Still private.', 'Could be boundary', 'Conservative.'}:
-                self.assertTrue(item['human_only'], item['text'])
+        by_text = {item['text']: item for item in ambiguous['blocks']}
+        for text in ('个人笔记（人工填写）', 'Parent.', 'Maybe child', 'Still private.'):
+            self.assertTrue(by_text[text]['human_only'], text)
+        self.assertFalse(by_text['Could be boundary']['human_only'])
+        self.assertFalse(by_text['Conservative.']['human_only'])
 
     def test_role_map_rejects_ai_or_mixed_nested_protected_descendants(self):
         snapshot = snapshot_template({

@@ -32,7 +32,8 @@ def _protect_sections(blocks):
     snapshot schema remains unchanged, while a human-only section owns every
     following descendant until an equal or earlier level closes it.  An
     unknown XML level never closes an active section, so ambiguous input is
-    handled conservatively.
+    handled conservatively.  An explicit top-level level 1 heading is a
+    certain boundary even when an earlier XML heading was ambiguous.
     """
     protected = []
     active = []
@@ -41,7 +42,11 @@ def _protect_sections(blocks):
 
     for kind, text, level in blocks:
         if kind == 'heading':
-            if level is not None:
+            if level == 1:
+                # A declared top-level heading is a certain boundary for an
+                # otherwise ambiguous XML section as well.
+                active = []
+            elif level is not None:
                 active = [candidate for candidate in active
                           if candidate is None or candidate < level]
             current_start = len(protected)

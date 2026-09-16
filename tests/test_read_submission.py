@@ -300,5 +300,34 @@ class ReadSubmissionTests(unittest.TestCase):
                     {'kind': 'paragraph', 'text': 'Generated summary.'}]}]}
         self.assertEqual(validate_note_plan(plan, self.manifest, self.bundle,
                                             self.analysis, roles), plan)
+    def test_submission_accepts_explicit_h1_after_ambiguous_human_xml_section(self):
+        template = snapshot_template({
+            'document_id': 'doc-ambiguous', 'revision_id': 'ambiguous-r1',
+            'content': ('<doc><heading>Personal Notes (human only)</heading>'
+                        '<paragraph>Private.</paragraph><heading>Maybe child</heading>'
+                        '<paragraph>Still private.</paragraph><h1>Summary</h1>'
+                        '<paragraph>Writable.</paragraph></doc>')})
+        human, private, child, child_body, summary, summary_body = template['blocks']
+
+        def role(role_id, selectors, ownership, variants):
+            return {'role_id': role_id, 'selectors': selectors, 'heading': role_id,
+                    'ownership': ownership, 'instructions': 'Follow the role.',
+                    'variants': variants}
+
+        roles = {'schema_version': 1, 'template_digest': template['content_digest'],
+                 'template_revision': template['revision_id'], 'roles': [
+                     role('human', [human['selector'], private['selector'],
+                                    child['selector'], child_body['selector']],
+                          'human', []),
+                     role('summary', [summary['selector'], summary_body['selector']],
+                          'ai', ['research']),
+                 ]}
+        validate_role_map(roles, template)
+        plan = {'schema_version': 1, 'run_id': self.run['run_id'],
+                'template_digest': template['content_digest'],
+                'sections': [{'role_id': 'summary', 'blocks': [
+                    {'kind': 'paragraph', 'text': 'Generated summary.'}]}]}
+        self.assertEqual(validate_note_plan(plan, self.manifest, self.bundle,
+                                            self.analysis, roles), plan)
 if __name__ == '__main__':
     unittest.main()
