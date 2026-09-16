@@ -19,6 +19,7 @@ MAX_EXTRACTED_BYTES = 16 * 1024 * 1024
 MAX_SECTIONS = 10_000
 MAX_PDF_TREE_DEPTH = 256
 MAX_PDF_TREE_NODES = 100_000
+MAX_PDF_OBJECT_NUMBER = 8_388_607
 COMPONENTS = ('main_text', 'appendix', 'figures', 'tables', 'supplementary')
 STATUSES = {'complete', 'partial', 'unavailable', 'not_applicable'}
 _DIGEST = re.compile(r'[0-9a-f]{64}\Z')
@@ -103,6 +104,22 @@ def _atomic_bytes(path, payload):
                 pass
 
 
+def _pdf_object_number(raw):
+    if not isinstance(raw, bytes) or not raw or not raw.isdigit():
+        _error('PDF_UNSUPPORTED', 'A PDF object reference is malformed.')
+    if len(raw) > len(str(MAX_PDF_OBJECT_NUMBER)):
+        _error('SOURCE_TOO_COMPLEX', 'A PDF object number exceeds the safety limit.')
+    try:
+        number = int(raw)
+    except (ValueError, OverflowError):
+        _error('PDF_UNSUPPORTED', 'A PDF object reference is malformed.')
+    if number <= 0:
+        _error('PDF_UNSUPPORTED', 'A PDF object number must be positive.')
+    if number > MAX_PDF_OBJECT_NUMBER:
+        _error('SOURCE_TOO_COMPLEX', 'A PDF object number exceeds the safety limit.')
+    return number
+
+
 def _content_text(data):
     return _extract_pdf_text(data)
 
@@ -119,7 +136,7 @@ def _ordered_page_objects(objects):
     active = set()
     visited = set()
     entered = 0
-    stack = [(int(root.group(1)), 0, False)]
+    stack = [(_pdf_object_number(root.group(1)), 0, False)]
     while stack:
         number, depth, leaving = stack.pop()
         if leaving:
@@ -151,7 +168,7 @@ def _ordered_page_objects(objects):
             _error('PDF_UNSUPPORTED', 'The PDF page tree contains a non-page node.')
         kids = re.search(rb'/Kids\s*\[(.*?)\]', body, re.DOTALL)
         references = ([] if kids is None else
-                      [int(item) for item in
+                      [_pdf_object_number(item) for item in
                        re.findall(rb'(\d+)\s+\d+\s+R', kids.group(1))])
         if not references:
             _error('PDF_UNSUPPORTED', 'A PDF page-tree node has no valid children.')
@@ -165,7 +182,7 @@ def _pdf_pages(payload):
         _error('PDF_UNSUPPORTED', 'Only unencrypted PDF files are supported by the built-in extractor.')
     objects = {}
     for match in re.finditer(rb'(?m)(\d+)\s+(\d+)\s+obj\b(.*?)\bendobj\b', payload, re.DOTALL):
-        objects[int(match.group(1))] = match.group(3)
+        objects[_pdf_object_number(match.group(1))] = match.group(3)
     ordered = _ordered_page_objects(objects)
     page_numbers = ordered or [number for number, body in objects.items()
                                if re.search(rb'/Type\s*/Page\b', body)]
@@ -180,8 +197,8 @@ def _pdf_pages(payload):
             if verified_order:
                 pages.append((number, []))
             continue
-        refs = ([int(item) for item in re.findall(rb'(\d+)\s+\d+\s+R', contents.group(1))]
-                if contents.group(1) is not None else [int(contents.group(2))])
+        refs = ([_pdf_object_number(item) for item in re.findall(rb'(\d+)\s+\d+\s+R', contents.group(1))]
+                if contents.group(1) is not None else [_pdf_object_number(contents.group(2))])
         pages.append((number, refs))
     if not pages:
         verified_order = False

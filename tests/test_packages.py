@@ -152,6 +152,58 @@ class PackageTests(unittest.TestCase):
             extracted = (run_dir / source['sections'][0]['text_path']).read_text(
                 encoding='utf-8')
             self.assertEqual(extracted.strip(), 'Accuracy 95 percent')
+    def test_bundled_launcher_structures_oversized_pdf_numbers(self):
+        huge = b'9' * 5000
+        def referenced(catalog_pages=b'4', kids=b'1', contents=b'2'):
+            return (b'%PDF-1.4\n3 0 obj\n<< /Type /Catalog /Pages ' + catalog_pages
+                    + b' 0 R >>\nendobj\n4 0 obj\n<< /Type /Pages /Kids [' + kids
+                    + b' 0 R] /Count 1 >>\nendobj\n1 0 obj\n<< /Type /Page /Parent 4 0 R /Contents '
+                    + contents + b' 0 R >>\nendobj\n2 0 obj\n<< /Length 18 >>\nstream\n'
+                    + b'BT (valid) Tj ET\nendstream\nendobj\n%%EOF\n')
+        fixtures = {
+            'declaration': b'%PDF-1.4\n' + huge + b' 0 obj\n<< /Type /Page >>\nendobj\n%%EOF\n',
+            'root': referenced(catalog_pages=huge),
+            'kids': referenced(kids=huge),
+            'contents': referenced(contents=huge),
+        }
+        package = ROOT / 'dist/codex/plugins/paper2lark'
+        for location, payload in fixtures.items():
+            with self.subTest(location=location), tempfile.TemporaryDirectory(
+                    prefix=f'p2l-packaged-pdf-{location}-') as folder:
+                base = Path(folder)
+                home = base / 'home'
+                run = create_run(
+                    home,
+                    {'schema_version': 1, 'persist_to_library': False,
+                     'requested_depth': 'quick', 'reader_preference': 'builtin',
+                     'force_reread': False, 'record_id': 'recOversizedPdf'},
+                    {'schema_version': 1, 'document_id': 'doc', 'revision_id': '1',
+                     'content_digest': 'b' * 64, 'raw_content': '# Notes', 'blocks': []},
+                    {'schema_version': 1, 'missing_work': ['source_bundle']})
+                pdf = base / 'paper.pdf'
+                pdf.write_bytes(payload)
+                source_input = base / 'source.json'
+                source_input.write_text(json.dumps({
+                    'schema_version': 1, 'kind': 'pdf', 'path': str(pdf),
+                    'original_location': 'oversized fixture', 'metadata': {},
+                }), encoding='utf-8')
+                marker = base / 'provider-called'
+                fake_cli = base / 'fake-lark.py'
+                fake_cli.write_text(
+                    'from pathlib import Path\nPath(r"' + str(marker) + '").write_text("called")\n',
+                    encoding='utf-8')
+                result = subprocess.run([
+                    sys.executable, str(package / 'scripts/paper2lark.py'),
+                    '--home', str(home), '--lark-cli', str(fake_cli),
+                    'sources', 'ingest', '--run', run['run_id'], '--input', str(source_input),
+                ], cwd=base, capture_output=True, text=True, encoding='utf-8')
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                documents = [line for line in result.stdout.splitlines() if line.strip()]
+                self.assertEqual(len(documents), 1, result.stdout)
+                response = json.loads(documents[0])
+                self.assertEqual(response['error']['code'], 'SOURCE_TOO_COMPLEX')
+                self.assertNotIn('Traceback', result.stderr)
+                self.assertFalse(marker.exists())
     def test_build_info_has_exact_fixed_point_metrics_for_both_hosts(self):
         packages = {host: ROOT / 'dist' / host / 'plugins/paper2lark'
                     for host in ('claude', 'codex')}

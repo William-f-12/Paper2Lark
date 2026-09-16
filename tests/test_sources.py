@@ -11,7 +11,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 
 from paper2lark.errors import Paper2LarkError
 from paper2lark.runs import create_run, load_run
-from paper2lark.sources import (MAX_SECTIONS, _ordered_page_objects, ingest_source,
+from paper2lark.sources import (MAX_SECTIONS, _ordered_page_objects, _pdf_object_number,
+                                ingest_source,
                                 validate_source_bundle, validate_source_input)
 
 
@@ -51,7 +52,40 @@ def blank_first_page_pdf():
             b'trailer\n<< /Root 6 0 R >>\n%%EOF\n')
 
 
+def oversized_pdf_number(location):
+    huge = b'9' * 5000
+    if location == 'declaration':
+        return b'%PDF-1.4\n' + huge + b' 0 obj\n<< /Type /Page >>\nendobj\n%%EOF\n'
+    catalog_pages = huge if location == 'root' else b'4'
+    kids = huge if location == 'kids' else b'1'
+    contents = huge if location == 'contents' else b'2'
+    return (b'%PDF-1.4\n3 0 obj\n<< /Type /Catalog /Pages ' + catalog_pages
+            + b' 0 R >>\nendobj\n4 0 obj\n<< /Type /Pages /Kids [' + kids
+            + b' 0 R] /Count 1 >>\nendobj\n1 0 obj\n<< /Type /Page /Parent 4 0 R /Contents '
+            + contents + b' 0 R >>\nendobj\n2 0 obj\n<< /Length 18 >>\nstream\n'
+            + b'BT (valid) Tj ET\nendstream\nendobj\n%%EOF\n')
+
+
 class SourceIngestionTests(unittest.TestCase):
+    def test_oversized_pdf_object_and_reference_numbers_are_structured(self):
+        for location in ('declaration', 'root', 'kids', 'contents'):
+            paper = self.root / f'oversized-{location}.pdf'
+            paper.write_bytes(oversized_pdf_number(location))
+            with self.subTest(location=location):
+                with self.assertRaises(Paper2LarkError) as raised:
+                    ingest_source(self.home, self.run['run_id'],
+                                  validate_source_input(self.input('pdf', paper), self.root))
+                self.assertEqual(raised.exception.code, 'SOURCE_TOO_COMPLEX')
+        run_dir, manifest = load_run(self.home, self.run['run_id'])
+        self.assertEqual(manifest['status'], 'awaiting_source')
+        self.assertEqual(list((run_dir / 'assets').iterdir()), [])
+        self.assertEqual(list((run_dir / 'sections').iterdir()), [])
+    def test_pdf_object_number_rejects_malformed_and_out_of_range_values(self):
+        for raw, code in ((b'', 'PDF_UNSUPPORTED'), (b'x', 'PDF_UNSUPPORTED'),
+                          (b'0', 'PDF_UNSUPPORTED'), (b'8388608', 'SOURCE_TOO_COMPLEX')):
+            with self.subTest(raw=raw), self.assertRaises(Paper2LarkError) as raised:
+                _pdf_object_number(raw)
+            self.assertEqual(raised.exception.code, code)
     def test_iterative_page_tree_preserves_order_and_rejects_bad_graphs(self):
         valid = {
             1: b'<< /Type /Page >>', 2: b'<< /Type /Page >>',
