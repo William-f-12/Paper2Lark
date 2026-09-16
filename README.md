@@ -4,7 +4,7 @@ Latest verification: [M6 packaging and installation evidence, 2026-09-16](docs/c
 
 Paper2Lark is a lightweight local Claude Code and Codex plugin for managing and reading papers with a Lark library.
 
-**Current version: 0.7.0 — M6 release tooling.** Reproducible Claude Code and Codex marketplace ZIPs, checksums, installation/upgrade guides and archive workflow tests are implemented. Windows host installation has been verified; public release certification remains pending real model-driven Lark end-to-end acceptance and the advertised-platform gate. M5 library setup/customization and the complete collection, reading and publication workflows remain available.
+**Current version: 0.7.1 — audit hardening.** The A1–A9 data-preservation, crash-recovery, template, PDF, and input-validation fixes are integrated into reproducible Claude Code and Codex packages. Local synthetic and extracted-package verification is complete; public release certification still requires the deferred real model-driven Lark acceptance and advertised-platform gate.
 
 Install from a verified archive using the [Claude Code guide](docs/installation/claude.md) or [Codex CLI guide](docs/installation/codex.md). See [upgrades and recovery](docs/upgrading.md) before replacing an existing installation. Optional readers remain external and are never bundled.
 
@@ -20,7 +20,7 @@ python scripts/build_release.py
 
 Generated plugin roots are `dist/claude/plugins/paper2lark` and `dist/codex/plugins/paper2lark`. Both contain the same hash-pinned runtime. The builder refuses unknown files and redirected paths under `dist`; keep personal files elsewhere. Do not distribute an interrupted or failed build.
 
-Release output defaults to `.paper2lark-work/releases/`: `paper2lark-0.7.0-claude.zip`, `paper2lark-0.7.0-codex.zip`, `release-info.json`, and `SHA256SUMS`. Use `--output ABSOLUTE_CANONICAL_DIRECTORY` for a dedicated alternative. Output directories reject unexpected files and symlink/junction ancestors; use the real canonical path on systems with directory aliases. A future version needs a fresh output directory if older archives are present. Each ZIP contains the complete local marketplace, an installation guide, and the MIT license. Keep private configuration and state outside these packages.
+Release output defaults to `.paper2lark-work/releases/`: `paper2lark-0.7.1-claude.zip`, `paper2lark-0.7.1-codex.zip`, `release-info.json`, and `SHA256SUMS`. Use `--output ABSOLUTE_CANONICAL_DIRECTORY` for a dedicated alternative. Output directories reject unexpected files and symlink/junction ancestors; use the real canonical path on systems with directory aliases. A future version needs a fresh output directory if older archives are present. Each ZIP contains the complete local marketplace, an installation guide, and the MIT license. Keep private configuration and state outside these packages.
 
 Builds use fixed ZIP entry timestamps and permissions and exclude fixtures, tests, local state and optional skills. Repeated builds are byte-identical for the same source and compression toolchain; cross-toolchain compressed byte identity is not promised. Both hosts share exactly the same runtime hash. The per-plugin budget remains 256 KiB with zero third-party runtime dependencies. Development tests require Python with pip available for the existing CLI test harness; users do not need pip to run a release plugin.
 
@@ -174,7 +174,15 @@ python ./dist/codex/plugins/paper2lark/scripts/paper2lark.py papers add --input 
 python ./dist/codex/plugins/paper2lark/scripts/paper2lark.py papers add --input ./add.json --apply
 ```
 
-Identity reuse is based on canonical DOI, arXiv identifier, normalized HTTP(S) URL, or the exact hash of a local file/supplied text. Title is never a merge key. Existing nonempty title, keywords, status and priority are preserved; collection fills only empty metadata. Conflicting aliases stop with `IDENTITY_CONFLICT` instead of guessing. A repeated input returns `noop` when nothing needs to change.
+Identity reuse is based on canonical DOI, arXiv identifier, normalized HTTP(S) URL, or the exact hash of a local file/supplied text. Title is never a merge key. Existing nonempty title, keywords, status and priority are preserved; collection fills only empty metadata and rechecks those values immediately before writing. Conflicting aliases stop with `IDENTITY_CONFLICT` instead of guessing. A repeated input returns `noop` when nothing needs to change.
+
+A create apply saves a private intent before dispatch. If the record ID is unknown after an interruption, `COLLECTION_RESULT_UNCERTAIN` blocks every automatic retry, including a retry with edited metadata. Inspect the named journal and the bound table. Only after verifying the exact row, account, table and frozen fields, reconcile it explicitly with:
+
+```powershell
+python ./dist/codex/plugins/paper2lark/scripts/paper2lark.py papers add --input ./add.json --apply --adopt-record recVERIFIED
+```
+
+Paper2Lark does not infer an adoption from a title. Version 0.7.0 created no collection journal, so inspect existing rows before retrying an uncertain historical file-only add.
 
 List or search with intersection filters:
 
@@ -265,7 +273,7 @@ After obtaining the paper, describe the local UTF-8 text, abstract, or PDF in a 
 python ./dist/codex/plugins/paper2lark/scripts/paper2lark.py sources ingest --run RUN-ID --input ./source-input.json
 ```
 
-The built-in PDF fallback handles bounded, unencrypted text PDFs with classic page/content streams and common Flate compression. It follows the PDF `/Pages` tree before emitting page locators; when page order cannot be established, it emits object locators plus `PDF_PAGE_ORDER_UNVERIFIED`. Scanned, encrypted, font-encoded, or structurally complex PDFs may require host/OCR extraction. Inputs with more than 10,000 sections/pages fail before any source artifact is copied. Unsupported input returns a clear error instead of a false full-read claim. Abstract-only input is preserved as abstract-only, with main-text coverage unavailable even if a caller supplies a stronger inspection claim.
+The built-in PDF fallback handles bounded, unencrypted text PDFs with classic page/content streams and common Flate compression. Its lexical subset preserves supported text operands in source order, with at most 1,000,000 tokens and nesting depth 64. Iterative page traversal is bounded to depth 256 and 100,000 visited nodes. It follows the PDF `/Pages` tree before emitting page locators; when page order cannot be established, it emits object locators plus `PDF_PAGE_ORDER_UNVERIFIED`. Scanned, encrypted, font-encoded, or structurally complex PDFs may require host/OCR extraction. Inputs with more than 10,000 sections/pages fail before any source artifact is copied. Unsupported or over-complex input returns a structured error instead of guessed text or a false full-read claim. An invalid source kind returns `SOURCE_INVALID`, including non-string JSON values. Abstract-only input is preserved as abstract-only, with main-text coverage unavailable even if a caller supplies a stronger inspection claim.
 
 The host writes `analysis.json`, `note-plan.json`, and `role-map.json` from the handoff and source bundle. Submit and inspect the result:
 
@@ -274,7 +282,7 @@ python ./dist/codex/plugins/paper2lark/scripts/paper2lark.py read submit --run R
 python ./dist/codex/plugins/paper2lark/scripts/paper2lark.py runs show --run RUN-ID
 ```
 
-Submission rejects stale or reordered template maps, unresolved evidence, coverage-state substitutions, human-owned template writes, malformed note blocks, and invalid keyword proposals. Human markers protect their complete template section without treating phrases such as “Manual Evaluation” or “人工智能” as personal content. Keywords remain English, reuse live options first, contain at most three words each, and total at most eight. A hash-bound `submitting` manifest state makes a retry reuse the first valid UTC generation timestamp after an interrupted final write. A successful result includes `draft.md`, `verification.json`, actual coverage, warnings, canonical keywords, template revision, and source hashes under the private run directory. Run artifacts are write-once; `runs show` rechecks every recorded path, size and SHA-256 before returning success.
+Submission rejects stale or reordered template maps, unresolved evidence, coverage-state substitutions, human-owned template writes, malformed note blocks, and invalid keyword proposals. Human markers protect their complete template section and every nested descendant until a heading of equal or smaller depth, without treating phrases such as “Manual Evaluation” or “人工智能” as personal content. Keywords remain English, reuse live options first, contain at most three words each, and total at most eight. A hash-bound `submitting` manifest state makes a retry reuse the first valid UTC generation timestamp after an interrupted final write. A successful result includes `draft.md`, `verification.json`, actual coverage, warnings, canonical keywords, template revision, and source hashes under the private run directory. Run artifacts are write-once; `runs show` rechecks every recorded path, size and SHA-256 before returning success.
 
 For an authorized read-and-save run, create and inspect an immutable plan, then apply that exact file:
 
@@ -287,7 +295,18 @@ python ./dist/codex/plugins/paper2lark/scripts/paper2lark.py runs cancel --run R
 
 `publish plan` is remote read-only. It freezes the binding and artifact hashes, rechecks the template/record/vocabulary, snapshots the intended Wiki parent's children, and rejects an incomplete full read. `publish apply` journals intent before each write, creates and verifies a separate note revision, then updates the note link, summary, eligible keywords, and optionally reading status. Existing notes are never replaced in place because the tested Lark revision flag is not compare-and-swap.
 
-If a document response is lost, the run enters `uncertain_remote_commit`; repeat the same apply command so recovery can inspect newly observed children and adopt exactly one note matching the run, record and source markers and the complete publication digest. It never blindly creates another document. Persistent reading reserves one active run per paper; an `ACTIVE_RUN_EXISTS` response identifies the run to resume. A changed note link or summary produces `blocked_conflict`; changed status or keywords are preserved and reported. `completed` is idempotent and does not create a duplicate note or timestamp. `runs cancel` is an explicit local abandonment action: it retains every artifact and releases the reservation without contacting Lark. If publishing had started, the result reports that remote state may remain.
+If a document response is lost, the run enters `uncertain_remote_commit`; repeat the same apply command so recovery can inspect newly observed children and adopt exactly one note matching the run, record and source markers and the complete publication digest. It never blindly creates another document. Verified operation snapshots retain a bounded receipt (document/node identity, revision, content digest and note URL), not the full note or arbitrary provider fields. If the final result was written before the manifest transition, retry adopts that stranded result only after exact operation, baseline, binding and active-owner checks; later human status or keyword edits are not reset.
+
+Persistent reading reserves one active run per paper; an `ACTIVE_RUN_EXISTS` response identifies the run to resume. A changed note link or summary produces `blocked_conflict`; changed status or keywords are preserved and reported. `completed` is idempotent and does not create a duplicate note or timestamp. `runs cancel` is an explicit local abandonment action: it retains every artifact and releases the reservation without contacting Lark. If publishing had started, the result reports that remote state may remain.
+
+A legacy reservation with no complete initial run can be inspected and released locally:
+
+```powershell
+python ./dist/codex/plugins/paper2lark/scripts/paper2lark.py runs repair-reservation --run RUN-ID
+python ./dist/codex/plugins/paper2lark/scripts/paper2lark.py runs repair-reservation --run RUN-ID --apply
+```
+
+Preview is read-only. Apply refuses valid resumable runs, unknown/corrupt artifacts, evidence of publication, a different binding or active owner, and retains all partial files. It never contacts Lark and never releases a reservation because of age alone.
 
 ## Diagnose without repair
 
@@ -315,7 +334,7 @@ New local files/directories use restrictive POSIX modes where supported. Windows
 
 M2 index writes, M3 reading, and M4 publication/recovery use a real subprocess boundary with a synthetic provider. Existing-library live acceptance remains read-only; production Wiki/Base writes were not executed for M4. M5 provisioning has synthetic end-to-end and fault-injection coverage; fresh production Wiki creation has not been exercised. The runtime does not ingest figure/table assets, certify scanned-PDF OCR, support global multi-machine exactly-once delivery, or perform concurrent in-place document editing.
 
-See the [design](docs/superpowers/specs/2026-09-13-paper2lark-design.md), [M0 findings](docs/compatibility-m0.md), [M1 validation report](docs/compatibility-m1.md), [M2 validation report](docs/compatibility-m2.md), [M3 validation report](docs/compatibility-m3.md), [M4 validation report](docs/compatibility-m4.md), and [M5 validation report](docs/compatibility-m5.md). The M0 revision finding is why M4 publishes a separate note revision.
+See the [design](docs/superpowers/specs/2026-09-13-paper2lark-design.md), [M0 findings](docs/compatibility-m0.md), [M1 validation report](docs/compatibility-m1.md), [M2 validation report](docs/compatibility-m2.md), [M3 validation report](docs/compatibility-m3.md), [M4 validation report](docs/compatibility-m4.md), and [M5 validation report](docs/compatibility-m5.md). The [0.7.1 audit-fix report](docs/compatibility-audit-fixes.md) maps A1–A9 to focused regressions and release evidence. The M0 revision finding is why M4 publishes a separate note revision.
 
 ## License
 

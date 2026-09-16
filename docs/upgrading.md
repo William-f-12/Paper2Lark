@@ -2,6 +2,14 @@
 
 Plugin files are replaceable. Your private home is durable: configuration, profile bindings, SQLite state, reading runs and setup journals remain outside host caches. Keep the same absolute `PAPER2LARK_HOME` and `PAPER2LARK_PROFILE` in both hosts, or supply `--home` and `--profile` before every runtime command. Installing or removing a plugin must not remove this home or change Lark authorization.
 
+## Upgrading from 0.7.0 to 0.7.1
+
+Stop every 0.7.0 writer in both hosts before the first 0.7.1 write. Both hosts must use 0.7.1 together against one home: 0.7.0 cannot honor the collection intent journal added in 0.7.1. This is a same-machine coordination rule, not a cross-machine exactly-once guarantee.
+
+The SQLite schema remains v3. Valid 0.7.0 homes and unfinished reading runs remain readable; no implicit state migration is introduced. Collection journals are separate version-one JSON artifacts under the private home. A 0.7.0 uncertain file-only creation has no journal, so inspect the bound table before retrying it.
+
+Setup plans remain exact-version artifacts. A plan created by 0.7.0 returns `SETUP_RUNTIME_MISMATCH` under 0.7.1. Retain the original runtime and use it for that plan after confirming state compatibility; never edit the saved version or plan digest. New reading runs use corrected nested human-only template protection. Existing drafts retain their frozen template snapshot and role map.
+
 ## Before replacing a package
 
 1. Stop active Paper2Lark operations in both hosts. Record the installed version and runtime hash from `probe` and retain the complete old extracted marketplace and original ZIP. Do not rely on a host cache: uninstalling can remove it.

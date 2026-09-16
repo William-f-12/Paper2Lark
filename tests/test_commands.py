@@ -358,7 +358,7 @@ class CommandTests(unittest.TestCase):
             self.assertTrue(data['data']['healthy'])
             result, data = self.invoke(scenario, 'probe')
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(data['data']['version'], '0.7.0')
+            self.assertEqual(data['data']['version'], '0.7.1')
 
     def test_add_preview_is_read_only_and_metacharacters_remain_data(self):
         with tempfile.TemporaryDirectory(prefix='命令 preview ') as folder:

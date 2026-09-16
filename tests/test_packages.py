@@ -348,7 +348,7 @@ class PackageTests(unittest.TestCase):
                for host, package in packages.items()}
         self.assertEqual(raw['claude'], raw['codex'])
         info = json.loads(raw['codex'])
-        self.assertEqual(info['version'], '0.7.0')
+        self.assertEqual(info['version'], '0.7.1')
         self.assertEqual(info['runtime_format'], 'stdlib-zipapp')
         self.assertEqual(info['third_party_dependencies'], [])
         runtime = (packages['codex'] / 'runtime.pyz').read_bytes()

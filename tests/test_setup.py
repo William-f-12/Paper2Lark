@@ -93,6 +93,14 @@ class SetupTests(unittest.TestCase):
         self.assertIsNone(load_binding(self.home, 'personal'))
         self.assertEqual(plan['mode'], 'create')
 
+    def test_setup_plan_requires_its_original_runtime_version(self):
+        with patch('paper2lark.setup.__version__', '0.7.0'):
+            plan, _ = self.plan()
+        with self.assertRaises(Paper2LarkError) as caught:
+            self.apply(plan)
+        self.assertEqual(caught.exception.code, 'SETUP_RUNTIME_MISMATCH')
+        self.assertEqual(self.provider.writes, [])
+
     def test_create_and_completed_replay(self):
         plan, _ = self.plan()
         result = self.apply(plan)
