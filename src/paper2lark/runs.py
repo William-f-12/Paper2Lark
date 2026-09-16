@@ -294,6 +294,20 @@ def verify_run_artifacts(run_dir, manifest):
     return manifest
 
 
+def _initialization_file_error(path):
+    remaining = MAX_ARTIFACT_BYTES + 1
+    try:
+        with path.open('rb') as stream:
+            while remaining:
+                chunk = stream.read(min(64 * 1024, remaining))
+                if not chunk:
+                    return None
+                remaining -= len(chunk)
+    except OSError:
+        return 'INITIALIZATION_ARTIFACT_UNREADABLE'
+    return 'INITIALIZATION_ARTIFACT_TOO_LARGE'
+
+
 def _reservation_repair_inspection(home, binding, run_id, reservation):
     expected = (binding['library_id'], digest(binding), binding['base_token'], binding['table_id'])
     actual = (reservation['library_id'], reservation['binding_digest'],
@@ -343,8 +357,12 @@ def _reservation_repair_inspection(home, binding, run_id, reservation):
         return 'UNKNOWN_RUN_ARTIFACT', False
     try:
         for child in children:
-            if child.name in _INITIALIZATION_FILES and not child.is_file():
-                return 'INITIALIZATION_STATE_INVALID', False
+            if child.name in _INITIALIZATION_FILES:
+                if not child.is_file():
+                    return 'INITIALIZATION_STATE_INVALID', False
+                file_error = _initialization_file_error(child)
+                if file_error is not None:
+                    return file_error, False
             if child.name in _INITIALIZATION_DIRECTORIES:
                 if not child.is_dir() or any(child.iterdir()):
                     return 'INITIALIZATION_STATE_INVALID', False

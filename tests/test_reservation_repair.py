@@ -1,3 +1,4 @@
+from contextlib import closing
 import json
 import multiprocessing
 from pathlib import Path
@@ -6,8 +7,8 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 import uuid
-from contextlib import closing
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
@@ -313,6 +314,38 @@ class ReservationRepairTests(unittest.TestCase):
                         state.release_run(
                             self.home, self.library,
                             self.paper['paper_uid'], run_id)
+
+    def test_repair_blocks_unreadable_allowed_initialization_file(self):
+        run_id = self._run_id()
+        state.reserve_run(
+            self.home, self.library, self.paper['paper_uid'], run_id)
+        try:
+            run_dir = self.home / 'runs' / run_id
+            run_dir.mkdir(parents=True)
+            request = run_dir / 'request.json'
+            request.write_text('{}\n', encoding='utf-8')
+            with patch('paper2lark.runs.Path.open',
+                       side_effect=PermissionError('denied')):
+                preview = repair_reservation(
+                    self.home, self.binding, run_id, apply=False)
+                self.assertFalse(preview['repairable'])
+                self.assertEqual(
+                    preview['reason'], 'INITIALIZATION_ARTIFACT_UNREADABLE')
+                with self.assertRaises(Paper2LarkError) as raised:
+                    repair_reservation(
+                        self.home, self.binding, run_id, apply=True)
+                self.assertEqual(
+                    raised.exception.code, 'RESERVATION_REPAIR_BLOCKED')
+            self.assertEqual(state.get_active_run(
+                self.home, self.library,
+                self.paper['paper_uid'])['run_id'], run_id)
+            self.assertTrue(request.exists())
+        finally:
+            active = state.get_active_run(
+                self.home, self.library, self.paper['paper_uid'])
+            if active is not None and active['run_id'] == run_id:
+                state.release_run(
+                    self.home, self.library, self.paper['paper_uid'], run_id)
 
 if __name__ == '__main__':
     multiprocessing.freeze_support()
