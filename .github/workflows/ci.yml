@@ -1,0 +1,32 @@
+name: Verify packages
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ['3.11', '3.12', '3.13']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Run contracts and archive workflows
+        run: python -m unittest discover -s tests -v
+      - name: Build release candidates
+        run: python scripts/build_release.py
+      - name: Save candidate artifacts (not a public release)
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.13'
+        uses: actions/upload-artifact@v4
+        with:
+          name: paper2lark-release-candidates
+          path: .paper2lark-work/releases/*
+          include-hidden-files: true
+          if-no-files-found: error

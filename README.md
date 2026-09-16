@@ -1,10 +1,12 @@
 # Paper2Lark
 
-Latest verification: [M5 provisioning and customization, 2026-09-16](docs/compatibility-m5.md).
+Latest verification: [M6 packaging and installation evidence, 2026-09-16](docs/compatibility-m6.md).
 
 Paper2Lark is a lightweight local Claude Code and Codex plugin for managing and reading papers with a Lark library.
 
-**Current milestone: M5 — provisioning and customization (0.6.0).** Create a new English/Chinese Wiki library, bind an existing one, or plan additive field migration and explicit remapping. Collection, evidence-linked drafts, verified publication and recovery remain available. M6 release certification is still pending.
+**Current version: 0.7.0 — M6 release tooling.** Reproducible Claude Code and Codex marketplace ZIPs, checksums, installation/upgrade guides and archive workflow tests are implemented. Windows host installation has been verified; public release certification remains pending real model-driven Lark end-to-end acceptance and the advertised-platform gate. M5 library setup/customization and the complete collection, reading and publication workflows remain available.
+
+Install from a verified archive using the [Claude Code guide](docs/installation/claude.md) or [Codex CLI guide](docs/installation/codex.md). See [upgrades and recovery](docs/upgrading.md) before replacing an existing installation. Optional readers remain external and are never bundled.
 
 ## Build and test
 
@@ -13,9 +15,16 @@ Requires Python 3.11+. Windows with Python 3.13.5 is the tested environment. The
 ```powershell
 python -m unittest discover -s tests -v
 python scripts/build_plugins.py
+python scripts/build_release.py
 ```
 
 Generated plugin roots are `dist/claude/plugins/paper2lark` and `dist/codex/plugins/paper2lark`. Both contain the same hash-pinned runtime. The builder refuses unknown files and redirected paths under `dist`; keep personal files elsewhere. Do not distribute an interrupted or failed build.
+
+Release output defaults to `.paper2lark-work/releases/`: `paper2lark-0.7.0-claude.zip`, `paper2lark-0.7.0-codex.zip`, `release-info.json`, and `SHA256SUMS`. Use `--output ABSOLUTE_CANONICAL_DIRECTORY` for a dedicated alternative. Output directories reject unexpected files and symlink/junction ancestors; use the real canonical path on systems with directory aliases. A future version needs a fresh output directory if older archives are present. Each ZIP contains the complete local marketplace, an installation guide, and the MIT license. Keep private configuration and state outside these packages.
+
+Builds use fixed ZIP entry timestamps and permissions and exclude fixtures, tests, local state and optional skills. Repeated builds are byte-identical for the same source and compression toolchain; cross-toolchain compressed byte identity is not promised. Both hosts share exactly the same runtime hash. The per-plugin budget remains 256 KiB with zero third-party runtime dependencies. Development tests require Python with pip available for the existing CLI test harness; users do not need pip to run a release plugin.
+
+The GitHub Actions workflow defines Python 3.11/3.12/3.13 checks on Windows/macOS/Linux. A defined matrix is not a completed run or a supported-host claim. Builds save candidate artifacts only and do not publish a GitHub release. The [release checklist](docs/release-checklist.md) specifies the remaining acceptance evidence.
 
 ## Host installation
 

@@ -40,6 +40,13 @@ class PackageTests(unittest.TestCase):
             self.assertEqual(results[0], results[1])
             self.assertFalse((base / 'shared state').exists())
 
+    def test_runtime_zip_metadata_is_platform_independent(self):
+        with zipfile.ZipFile(ROOT / 'dist/codex/plugins/paper2lark/runtime.pyz') as runtime:
+            for entry in runtime.infolist():
+                self.assertEqual(entry.create_system, 3, entry.filename)
+                self.assertEqual(entry.external_attr, 0o100644 << 16, entry.filename)
+                self.assertEqual(entry.date_time, (2026, 1, 1, 0, 0, 0))
+
     def test_relative_state_override_is_rejected(self):
         result = self.run_probe(ROOT / 'dist/codex/plugins/paper2lark', 'relative', ROOT)
         self.assertNotEqual(result.returncode, 0)
@@ -111,7 +118,7 @@ class PackageTests(unittest.TestCase):
                for host, package in packages.items()}
         self.assertEqual(raw['claude'], raw['codex'])
         info = json.loads(raw['codex'])
-        self.assertEqual(info['version'], '0.6.0')
+        self.assertEqual(info['version'], '0.7.0')
         self.assertEqual(info['runtime_format'], 'stdlib-zipapp')
         self.assertEqual(info['third_party_dependencies'], [])
         runtime = (packages['codex'] / 'runtime.pyz').read_bytes()

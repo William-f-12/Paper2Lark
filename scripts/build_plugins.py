@@ -49,6 +49,8 @@ def build():
             files['paper2lark/' + name] = (ROOT / 'src/paper2lark' / name).read_bytes()
         for name, contents in sorted(files.items()):
             entry = zipfile.ZipInfo(name, date_time=(2026, 1, 1, 0, 0, 0))
+            entry.create_system = 3
+            entry.external_attr = (stat.S_IFREG | 0o644) << 16
             entry.compress_type = zipfile.ZIP_DEFLATED
             archive.writestr(entry, contents)
     payload = buffer.getvalue()
