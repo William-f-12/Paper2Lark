@@ -152,31 +152,46 @@ class PackageTests(unittest.TestCase):
             extracted = (run_dir / source['sections'][0]['text_path']).read_text(
                 encoding='utf-8')
             self.assertEqual(extracted.strip(), 'Accuracy 95 percent')
-    def test_bundled_launcher_structures_oversized_pdf_numbers(self):
+
+    def test_bundled_launcher_structures_malformed_pdf_references(self):
         huge = b'9' * 5000
-        def referenced(catalog_pages=b'4', kids=b'1', contents=b'2'):
-            return (b'%PDF-1.4\n3 0 obj\n<< /Type /Catalog /Pages ' + catalog_pages
-                    + b' 0 R >>\nendobj\n4 0 obj\n<< /Type /Pages /Kids [' + kids
-                    + b' 0 R] /Count 1 >>\nendobj\n1 0 obj\n<< /Type /Page /Parent 4 0 R /Contents '
-                    + contents + b' 0 R >>\nendobj\n2 0 obj\n<< /Length 18 >>\nstream\n'
-                    + b'BT (valid) Tj ET\nendstream\nendobj\n%%EOF\n')
+
+        def referenced(pages=b'4 0 R', kids=b'1 0 R', contents=b'2 0 R',
+                       root=b'3 0 R'):
+            return (b'%PDF-1.4\n3 0 obj\n<< /Type /Catalog /Pages ' + pages
+                    + b' >>\nendobj\n4 0 obj\n<< /Type /Pages /Kids [' + kids
+                    + b'] /Count 1 >>\nendobj\n1 0 obj\n<< /Type /Page /Parent 4 0 R /Contents '
+                    + contents + b' >>\nendobj\n2 0 obj\n<< /Length 18 >>\nstream\n'
+                    + b'BT (valid) Tj ET\nendstream\nendobj\ntrailer\n<< /Root '
+                    + root + b' >>\n%%EOF\n')
         fixtures = {
-            'declaration': b'%PDF-1.4\n' + huge + b' 0 obj\n<< /Type /Page >>\nendobj\n%%EOF\n',
-            'root': referenced(catalog_pages=huge),
-            'kids': referenced(kids=huge),
-            'contents': referenced(contents=huge),
+            'oversized-declaration': (
+                b'%PDF-1.4\n' + huge + b' 0 obj\n<< /Type /Page >>\nendobj\n%%EOF\n',
+                'SOURCE_TOO_COMPLEX'),
+            'oversized-pages': (referenced(pages=huge + b' 0 R'),
+                                'SOURCE_TOO_COMPLEX'),
+            'oversized-kids': (referenced(kids=huge + b' 0 R'),
+                               'SOURCE_TOO_COMPLEX'),
+            'oversized-contents': (referenced(contents=huge + b' 0 R'),
+                                   'SOURCE_TOO_COMPLEX'),
+            'signed-pages': (referenced(pages=b'-1 0 R'), 'PDF_UNSUPPORTED'),
+            'signed-generation': (referenced(pages=b'4 -1 R'), 'PDF_UNSUPPORTED'),
+            'signed-root': (referenced(root=b'-1 0 R'), 'PDF_UNSUPPORTED'),
+            'oversized-generation': (referenced(kids=b'1 ' + huge + b' R'),
+                                     'SOURCE_TOO_COMPLEX'),
+            'partial-contents': (referenced(contents=b'1 0'), 'PDF_UNSUPPORTED'),
         }
         package = ROOT / 'dist/codex/plugins/paper2lark'
-        for location, payload in fixtures.items():
-            with self.subTest(location=location), tempfile.TemporaryDirectory(
-                    prefix=f'p2l-packaged-pdf-{location}-') as folder:
+        for case, (payload, code) in fixtures.items():
+            with self.subTest(case=case), tempfile.TemporaryDirectory(
+                    prefix=f'p2l-packaged-pdf-{case}-') as folder:
                 base = Path(folder)
                 home = base / 'home'
                 run = create_run(
                     home,
                     {'schema_version': 1, 'persist_to_library': False,
                      'requested_depth': 'quick', 'reader_preference': 'builtin',
-                     'force_reread': False, 'record_id': 'recOversizedPdf'},
+                     'force_reread': False, 'record_id': 'recMalformedPdf'},
                     {'schema_version': 1, 'document_id': 'doc', 'revision_id': '1',
                      'content_digest': 'b' * 64, 'raw_content': '# Notes', 'blocks': []},
                     {'schema_version': 1, 'missing_work': ['source_bundle']})
@@ -185,7 +200,7 @@ class PackageTests(unittest.TestCase):
                 source_input = base / 'source.json'
                 source_input.write_text(json.dumps({
                     'schema_version': 1, 'kind': 'pdf', 'path': str(pdf),
-                    'original_location': 'oversized fixture', 'metadata': {},
+                    'original_location': 'malformed fixture', 'metadata': {},
                 }), encoding='utf-8')
                 marker = base / 'provider-called'
                 fake_cli = base / 'fake-lark.py'
@@ -201,9 +216,10 @@ class PackageTests(unittest.TestCase):
                 documents = [line for line in result.stdout.splitlines() if line.strip()]
                 self.assertEqual(len(documents), 1, result.stdout)
                 response = json.loads(documents[0])
-                self.assertEqual(response['error']['code'], 'SOURCE_TOO_COMPLEX')
+                self.assertEqual(response['error']['code'], code)
                 self.assertNotIn('Traceback', result.stderr)
                 self.assertFalse(marker.exists())
+
     def test_build_info_has_exact_fixed_point_metrics_for_both_hosts(self):
         packages = {host: ROOT / 'dist' / host / 'plugins/paper2lark'
                     for host in ('claude', 'codex')}

@@ -11,7 +11,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 
 from paper2lark.errors import Paper2LarkError
 from paper2lark.runs import create_run, load_run
-from paper2lark.sources import (MAX_SECTIONS, _ordered_page_objects, _pdf_object_number,
+from paper2lark.sources import (MAX_SECTIONS, _ordered_page_objects,
+                                _pdf_generation_number, _pdf_object_number,
                                 ingest_source,
                                 validate_source_bundle, validate_source_input)
 
@@ -66,7 +67,88 @@ def oversized_pdf_number(location):
             + b'BT (valid) Tj ET\nendstream\nendobj\n%%EOF\n')
 
 
+def leading_zero_pdf():
+    return (b'%PDF-1.4\n'
+            b'08388607 00000 obj\n<< /Type /Page /Parent 00000001 00000 R '
+            b'/Contents 00000003 00000 R >>\nendobj\n'
+            b'00000001 00000 obj\n<< /Type /Pages /Kids [08388607 00000 R] '
+            b'/Count 1 >>\nendobj\n'
+            b'00000002 00000 obj\n<< /Type /Catalog /Pages 00000001 00000 R >>\nendobj\n'
+            b'00000003 00000 obj\n<< /Length 18 >>\nstream\n'
+            b'BT (valid) Tj ET\nendstream\nendobj\n'
+            b'trailer\n<< /Root 00000002 00000 R >>\n%%EOF\n')
+
+def malformed_pdf_reference(location, value):
+    declaration = ((value + b' obj\n<< /Type /Page >>\nendobj\n')
+                   if location == 'declaration' else b'')
+    pages = value if location == 'pages' else b'4 0 R'
+    kids = value if location == 'kids' else b'1 0 R'
+    contents = value if location == 'contents' else b'2 0 R'
+    root = value if location == 'trailer_root' else b'3 0 R'
+    return (b'%PDF-1.4\n' + declaration
+            + b'3 0 obj\n<< /Type /Catalog /Pages ' + pages + b' >>\nendobj\n'
+            + b'4 0 obj\n<< /Type /Pages /Kids [' + kids + b'] /Count 1 >>\nendobj\n'
+            + b'1 0 obj\n<< /Type /Page /Parent 4 0 R /Contents ' + contents
+            + b' >>\nendobj\n2 0 obj\n<< /Length 18 >>\nstream\n'
+            + b'BT (valid) Tj ET\nendstream\nendobj\ntrailer\n<< /Root ' + root
+            + b' >>\n%%EOF\n')
+
+
 class SourceIngestionTests(unittest.TestCase):
+    def test_leading_zero_object_headers_and_references_ingest_successfully(self):
+        paper = self.root / 'leading-zero.pdf'
+        paper.write_bytes(leading_zero_pdf())
+        ingest_source(self.home, self.run['run_id'],
+                      validate_source_input(self.input('pdf', paper), self.root))
+        run_dir, _ = load_run(self.home, self.run['run_id'])
+        bundle = json.loads((run_dir / 'source.json').read_text(encoding='utf-8'))
+        self.assertEqual(bundle['sections'][0]['locator'], {'kind': 'page', 'value': '1'})
+        self.assertEqual((run_dir / bundle['sections'][0]['text_path']).read_text(
+            encoding='utf-8').strip(), 'valid')
+
+    def test_full_reference_grammar_rejects_signed_huge_generation_and_partial_values(self):
+        huge_generation = b'9' * 5000
+        forms = (
+            ('signed-object',
+             lambda location: b'-1 0' if location == 'declaration' else b'-1 0 R',
+             'PDF_UNSUPPORTED'),
+            ('signed-generation',
+             lambda location: b'1 -1' if location == 'declaration' else b'1 -1 R',
+             'PDF_UNSUPPORTED'),
+            ('generation', lambda location: (b'1 ' + huge_generation if location == 'declaration'
+                                              else b'1 ' + huge_generation + b' R'),
+             'SOURCE_TOO_COMPLEX'),
+            ('partial', lambda location: b'1' if location == 'declaration' else b'1 0',
+             'PDF_UNSUPPORTED'),
+        )
+        locations = ('declaration', 'pages', 'kids', 'contents', 'trailer_root')
+        for form, make_value, code in forms:
+            for location in locations:
+                paper = self.root / f'{form}-{location}.pdf'
+                paper.write_bytes(malformed_pdf_reference(location, make_value(location)))
+                local_home = self.root / f'home-{form}-{location}'
+                run = create_run(
+                    local_home,
+                    {'schema_version': 1, 'persist_to_library': False,
+                     'requested_depth': 'quick', 'reader_preference': 'builtin',
+                     'force_reread': False, 'record_id': 'recMalformedPdf'},
+                    {'schema_version': 1, 'document_id': 'doc', 'revision_id': '1',
+                     'content_digest': 'b' * 64, 'raw_content': '# Notes', 'blocks': []},
+                    {'schema_version': 1, 'missing_work': ['source_bundle']})
+                with self.subTest(form=form, location=location):
+                    with self.assertRaises(Paper2LarkError) as raised:
+                        ingest_source(local_home, run['run_id'],
+                                      validate_source_input(self.input('pdf', paper), self.root))
+                    self.assertEqual(raised.exception.code, code)
+
+    def test_bounded_leading_zero_references_preserve_page_order(self):
+        objects = {
+            8_388_607: b'<< /Type /Page >>',
+            1: b'<< /Type /Pages /Kids [08388607 00000 R] >>',
+            2: b'<< /Type /Catalog /Pages 00000001 00065535 R >>',
+        }
+        self.assertEqual(_ordered_page_objects(objects), [8_388_607])
+
     def test_oversized_pdf_object_and_reference_numbers_are_structured(self):
         for location in ('declaration', 'root', 'kids', 'contents'):
             paper = self.root / f'oversized-{location}.pdf'
@@ -80,12 +162,26 @@ class SourceIngestionTests(unittest.TestCase):
         self.assertEqual(manifest['status'], 'awaiting_source')
         self.assertEqual(list((run_dir / 'assets').iterdir()), [])
         self.assertEqual(list((run_dir / 'sections').iterdir()), [])
-    def test_pdf_object_number_rejects_malformed_and_out_of_range_values(self):
-        for raw, code in ((b'', 'PDF_UNSUPPORTED'), (b'x', 'PDF_UNSUPPORTED'),
-                          (b'0', 'PDF_UNSUPPORTED'), (b'8388608', 'SOURCE_TOO_COMPLEX')):
-            with self.subTest(raw=raw), self.assertRaises(Paper2LarkError) as raised:
-                _pdf_object_number(raw)
-            self.assertEqual(raised.exception.code, code)
+
+    def test_pdf_reference_numbers_separate_lexical_and_value_bounds(self):
+        self.assertEqual(_pdf_object_number(b'00000001'), 1)
+        self.assertEqual(_pdf_object_number(b'08388607'), 8_388_607)
+        self.assertEqual(_pdf_generation_number(b'00065535'), 65_535)
+        cases = (
+            (_pdf_object_number, b'', 'PDF_UNSUPPORTED'),
+            (_pdf_object_number, b'x', 'PDF_UNSUPPORTED'),
+            (_pdf_object_number, b'0', 'PDF_UNSUPPORTED'),
+            (_pdf_object_number, b'8388608', 'SOURCE_TOO_COMPLEX'),
+            (_pdf_object_number, b'00000000000000001', 'SOURCE_TOO_COMPLEX'),
+            (_pdf_generation_number, b'-1', 'PDF_UNSUPPORTED'),
+            (_pdf_generation_number, b'65536', 'SOURCE_TOO_COMPLEX'),
+        )
+        for parser, raw, code in cases:
+            with self.subTest(parser=parser.__name__, raw=raw):
+                with self.assertRaises(Paper2LarkError) as raised:
+                    parser(raw)
+                self.assertEqual(raised.exception.code, code)
+
     def test_iterative_page_tree_preserves_order_and_rejects_bad_graphs(self):
         valid = {
             1: b'<< /Type /Page >>', 2: b'<< /Type /Page >>',
