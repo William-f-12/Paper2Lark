@@ -23,6 +23,8 @@ MAX_PDF_TREE_NODES = 100_000
 MAX_PDF_OBJECT_NUMBER = 8_388_607
 MAX_PDF_GENERATION_NUMBER = 65_535
 MAX_PDF_INTEGER_DIGITS = 16
+MAX_PDF_SCAN_TOKENS = 1_000_000
+MAX_PDF_LEXICAL_NESTING = 64
 COMPONENTS = ('main_text', 'appendix', 'figures', 'tables', 'supplementary')
 STATUSES = {'complete', 'partial', 'unavailable', 'not_applicable'}
 _DIGEST = re.compile(r'[0-9a-f]{64}\Z')
@@ -132,24 +134,81 @@ def _pdf_generation_number(raw):
     return _pdf_integer(raw, MAX_PDF_GENERATION_NUMBER, True, 'generation number')
 
 
-def _pdf_token(data, index=0):
+def _pdf_token_span(data, index=0):
     whitespace = b'\x00\x09\x0a\x0c\x0d\x20'
     delimiters = b'()<>[]{}/%'
-    while index < len(data) and data[index] in whitespace:
+    while True:
+        while index < len(data) and data[index] in whitespace:
+            index += 1
+        if index >= len(data) or data[index] != 37:
+            break
         index += 1
+        while index < len(data) and data[index] not in b'\r\n':
+            index += 1
     if index >= len(data):
-        return None, index
-    if data[index] in delimiters:
-        start = index
-        index += 1
-        if data[start:start + 2] in (b'<<', b'>>'):
-            index = start + 2
-        return data[start:index], index
+        return None, index, index
+
     start = index
+    marker = data[index]
+    if marker == 40:
+        index += 1
+        depth = 1
+        while index < len(data):
+            marker = data[index]
+            if marker == 92:
+                index += 1
+                if index >= len(data):
+                    _error('PDF_UNSUPPORTED', 'A PDF literal string has a dangling escape.')
+                if data[index] == 13 and index + 1 < len(data) and data[index + 1] == 10:
+                    index += 2
+                else:
+                    index += 1
+                continue
+            if marker == 40:
+                depth += 1
+                if depth > MAX_PDF_LEXICAL_NESTING:
+                    _error('SOURCE_TOO_COMPLEX',
+                           'PDF lexical nesting exceeds the safety limit.')
+            elif marker == 41:
+                depth -= 1
+                if depth == 0:
+                    return data[start:index + 1], start, index + 1
+            index += 1
+        _error('PDF_UNSUPPORTED', 'A PDF literal string is unterminated.')
+
+    if marker == 60:
+        if data[start:start + 2] == b'<<':
+            return b'<<', start, start + 2
+        index += 1
+        while index < len(data) and data[index] != 62:
+            index += 1
+        if index >= len(data):
+            _error('PDF_UNSUPPORTED', 'A PDF hexadecimal string is unterminated.')
+        return data[start:index + 1], start, index + 1
+
+    if marker == 62 and data[start:start + 2] == b'>>':
+        return b'>>', start, start + 2
+
+    if marker == 47:
+        index += 1
+        while (index < len(data) and data[index] not in whitespace
+               and data[index] not in delimiters):
+            index += 1
+        return data[start:index], start, index
+
+    if marker in delimiters:
+        return data[start:start + 1], start, start + 1
+
+    index += 1
     while (index < len(data) and data[index] not in whitespace
            and data[index] not in delimiters):
         index += 1
-    return data[start:index], index
+    return data[start:index], start, index
+
+
+def _pdf_token(data, index=0):
+    token, _, end = _pdf_token_span(data, index)
+    return token, end
 
 
 def _pdf_reference_parts(object_raw, generation_raw, operator):
@@ -169,18 +228,44 @@ def _pdf_reference_prefix(data, index=0, require_boundary=True):
     number, generation = _pdf_reference_parts(*tokens)
     if require_boundary:
         following, _ = _pdf_token(data, index)
-        if following not in (None, b'/', b'>>'):
+        if (following is not None and following != b'>>'
+                and not following.startswith(b'/')):
             _error('PDF_UNSUPPORTED', 'A PDF indirect reference has trailing tokens.')
     return number, generation, index
 
 
 def _pdf_key_tail(container, key):
-    matches = list(re.finditer(rb'/' + re.escape(key) + rb'\b', container))
+    target = b'/' + key
+    matches = []
+    index = 0
+    scanned = 0
+    while True:
+        token, _, end = _pdf_token_span(container, index)
+        if token is None or token == b'stream':
+            break
+        scanned += 1
+        if scanned > MAX_PDF_SCAN_TOKENS:
+            _error('SOURCE_TOO_COMPLEX', 'PDF token scanning exceeds the safety limit.')
+        if token == target:
+            matches.append(end)
+            if len(matches) > 1:
+                _error('PDF_UNSUPPORTED', 'A PDF dictionary repeats a reference key.')
+        index = end
     if not matches:
         return None
-    if len(matches) != 1:
-        _error('PDF_UNSUPPORTED', 'A PDF dictionary repeats a reference key.')
-    return container[matches[0].end():]
+    return container[matches[0]:]
+
+
+def _pdf_name_value(container, key):
+    tail = _pdf_key_tail(container, key)
+    if tail is None:
+        return None
+    token, _ = _pdf_token(tail)
+    return token
+
+
+def _pdf_has_type(container, name):
+    return _pdf_name_value(container, b'Type') == b'/' + name
 
 
 def _pdf_single_reference(container, key):
@@ -205,13 +290,15 @@ def _pdf_reference_array(container, key, allow_empty=False):
             _error('PDF_UNSUPPORTED', 'A PDF reference array is unterminated.')
         if token == b']':
             break
-        if token in (b'[', b'(', b')', b'<', b'>', b'<<', b'>>', b'{', b'}', b'/', b'%'):
+        if token in (b'[', b']', b'(', b')', b'<', b'>', b'<<', b'>>',
+                     b'{', b'}') or token.startswith(b'/'):
             _error('PDF_UNSUPPORTED', 'A PDF reference array contains malformed syntax.')
         tokens.append(token)
         if len(tokens) > MAX_PDF_TREE_NODES * 3:
             _error('SOURCE_TOO_COMPLEX', 'A PDF reference array exceeds the safety limit.')
     following, _ = _pdf_token(tail, index)
-    if following not in (None, b'/', b'>>'):
+    if (following is not None and following != b'>>'
+            and not following.startswith(b'/')):
         _error('PDF_UNSUPPORTED', 'A PDF reference array has trailing tokens.')
     if len(tokens) % 3 or (not tokens and not allow_empty):
         _error('PDF_UNSUPPORTED', 'A PDF reference array is incomplete.')
@@ -222,47 +309,135 @@ def _pdf_reference_array(container, key, allow_empty=False):
     return references
 
 
-def _pdf_object_header(raw):
-    tokens = []
-    index = 0
+def _pdf_stream_end(data, index):
+    while index < len(data) and data[index] in b'\x00\x09\x0c\x20':
+        index += 1
+    if data[index:index + 2] == b'\r\n':
+        index += 2
+    elif index < len(data) and data[index] in b'\r\n':
+        index += 1
+    else:
+        _error('PDF_UNSUPPORTED', 'A PDF stream header is malformed.')
+    match = re.search(rb'(?:\r\n|\r|\n)endstream(?=[\x00\x09\x0a\x0c\x0d\x20()<>\[\]{}/%]|$)',
+                      data[index:])
+    if match is None:
+        _error('PDF_UNSUPPORTED', 'A PDF stream is unterminated.')
+    return index + match.end()
+
+
+def _pdf_object_end(data, index):
+    scanned = 0
     while True:
-        token, index = _pdf_token(raw, index)
+        token, start, end = _pdf_token_span(data, index)
+        if token is None:
+            _error('PDF_UNSUPPORTED', 'A PDF object declaration is unterminated.')
+        scanned += 1
+        if scanned > MAX_PDF_SCAN_TOKENS:
+            _error('SOURCE_TOO_COMPLEX', 'PDF token scanning exceeds the safety limit.')
+        if token == b'stream':
+            index = _pdf_stream_end(data, end)
+            continue
+        if token == b'endobj':
+            return start, end
+        index = end
+
+
+def _pdf_dictionary_end(data, index):
+    token, start, end = _pdf_token_span(data, index)
+    if token != b'<<':
+        _error('PDF_UNSUPPORTED', 'A PDF trailer dictionary is malformed.')
+    depth = 1
+    scanned = 1
+    index = end
+    while depth:
+        token, _, end = _pdf_token_span(data, index)
+        if token is None:
+            _error('PDF_UNSUPPORTED', 'A PDF trailer dictionary is unterminated.')
+        scanned += 1
+        if scanned > MAX_PDF_SCAN_TOKENS:
+            _error('SOURCE_TOO_COMPLEX', 'PDF token scanning exceeds the safety limit.')
+        if token == b'<<':
+            depth += 1
+            if depth > MAX_PDF_LEXICAL_NESTING:
+                _error('SOURCE_TOO_COMPLEX',
+                       'PDF lexical nesting exceeds the safety limit.')
+        elif token == b'>>':
+            depth -= 1
+        index = end
+    return start, end
+
+
+def _pdf_structure(payload):
+    objects = {}
+    trailers = []
+    previous = []
+    index = 0
+    scanned = 0
+    while True:
+        token, _, end = _pdf_token_span(payload, index)
         if token is None:
             break
-        tokens.append(token)
-    if len(tokens) != 2:
-        _error('PDF_UNSUPPORTED', 'A PDF object declaration header is malformed.')
-    number = _pdf_object_number(tokens[0])
-    _pdf_generation_number(tokens[1])
-    return number
+        scanned += 1
+        if scanned > MAX_PDF_SCAN_TOKENS:
+            _error('SOURCE_TOO_COMPLEX', 'PDF token scanning exceeds the safety limit.')
+        if token == b'obj':
+            if len(previous) != 2:
+                _error('PDF_UNSUPPORTED',
+                       'A PDF object declaration header is malformed.')
+            number = _pdf_object_number(previous[0])
+            _pdf_generation_number(previous[1])
+            body_end, object_end = _pdf_object_end(payload, end)
+            objects[number] = payload[end:body_end]
+            index = object_end
+            previous = []
+            continue
+        if token == b'trailer':
+            trailer_start, trailer_end = _pdf_dictionary_end(payload, end)
+            trailers.append(payload[trailer_start:trailer_end])
+            index = trailer_end
+            previous = []
+            continue
+        previous = (previous + [token])[-2:]
+        index = end
+    return objects, trailers
 
 
-def _validate_trailer_roots(payload, objects):
-    for match in re.finditer(
-            rb'\btrailer\b(.*?)(?=\bstartxref\b|%%EOF)', payload, re.DOTALL):
-        root = _pdf_single_reference(match.group(1), b'Root')
+def _validate_trailer_roots(trailers, objects):
+    authoritative = None
+    for trailer in trailers:
+        root = _pdf_single_reference(trailer, b'Root')
         if root is None:
             continue
         body = objects.get(root)
-        if body is None or re.search(rb'/Type\s*/Catalog\b', body) is None:
+        if body is None or not _pdf_has_type(body, b'Catalog'):
             _error('PDF_UNSUPPORTED', 'The PDF trailer Root is not a Catalog object.')
-
+        authoritative = root
+    return authoritative
 
 def _content_text(data):
     return _extract_pdf_text(data)
 
 
-def _ordered_page_objects(objects):
-    catalogs = [body for body in objects.values()
-                if re.search(rb'/Type\s*/Catalog\b', body)]
-    roots = [_pdf_single_reference(body, b'Pages') for body in catalogs]
-    if len(catalogs) != 1 or roots[0] is None:
+def _ordered_page_objects(objects, root_catalog=None):
+    if root_catalog is not None:
+        catalog = objects[root_catalog]
+    else:
+        catalogs = [body for body in objects.values()
+                    if _pdf_has_type(body, b'Catalog')]
+        if len(catalogs) != 1:
+            return None
+        catalog = catalogs[0]
+    root = _pdf_single_reference(catalog, b'Pages')
+    if root is None:
+        if root_catalog is not None:
+            _error('PDF_UNSUPPORTED',
+                   'The PDF trailer Catalog has no Pages reference.')
         return None
     ordered = []
     active = set()
     visited = set()
     entered = 0
-    stack = [(roots[0], 0, False)]
+    stack = [(root, 0, False)]
     while stack:
         number, depth, leaving = stack.pop()
         if leaving:
@@ -282,7 +457,7 @@ def _ordered_page_objects(objects):
         if entered > MAX_PDF_TREE_NODES:
             _error('SOURCE_TOO_COMPLEX', 'PDF page-tree nodes exceed the safety limit.')
         active.add(number)
-        if re.search(rb'/Type\s*/Page\b', body):
+        if _pdf_has_type(body, b'Page'):
             if len(ordered) >= MAX_SECTIONS:
                 _error('SOURCE_TOO_COMPLEX',
                        'Source contains more than 10,000 sections or pages.')
@@ -290,7 +465,7 @@ def _ordered_page_objects(objects):
             active.remove(number)
             visited.add(number)
             continue
-        if re.search(rb'/Type\s*/Pages\b', body) is None:
+        if not _pdf_has_type(body, b'Pages'):
             _error('PDF_UNSUPPORTED', 'The PDF page tree contains a non-page node.')
         references = _pdf_reference_array(body, b'Kids')
         if not references:
@@ -303,14 +478,11 @@ def _ordered_page_objects(objects):
 def _pdf_pages(payload):
     if not payload.startswith(b'%PDF-') or b'/Encrypt' in payload:
         _error('PDF_UNSUPPORTED', 'Only unencrypted PDF files are supported by the built-in extractor.')
-    objects = {}
-    pattern = rb'(?ms)^[\x00\x09\x0c\x20]*([^\r\n]*?)\bobj\b(.*?)\bendobj\b'
-    for match in re.finditer(pattern, payload):
-        objects[_pdf_object_header(match.group(1))] = match.group(2)
-    _validate_trailer_roots(payload, objects)
-    ordered = _ordered_page_objects(objects)
+    objects, trailers = _pdf_structure(payload)
+    root_catalog = _validate_trailer_roots(trailers, objects)
+    ordered = _ordered_page_objects(objects, root_catalog)
     page_numbers = ordered or [number for number, body in objects.items()
-                               if re.search(rb'/Type\s*/Page\b', body)]
+                               if _pdf_has_type(body, b'Page')]
     verified_order = ordered is not None
     if len(page_numbers) > MAX_SECTIONS:
         _error('SOURCE_TOO_COMPLEX', 'Source contains more than 10,000 sections or pages.')

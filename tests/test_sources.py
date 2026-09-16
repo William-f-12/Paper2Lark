@@ -53,6 +53,34 @@ def blank_first_page_pdf():
             b'trailer\n<< /Root 6 0 R >>\n%%EOF\n')
 
 
+def commented_reference_pdf():
+    return (b'%PDF-1.4\r'
+            b'3 % object header comment\r\n0 % generation comment\robj\r'
+            b'<< /Type /Catalog /Note (/Pages 99 0 R) % /Pages 98 0 R\r'
+            b'/Pages 4 % object comment\r0 % generation comment\nR >>\rendobj\r'
+            b'4\r0\robj\r<< /Type /Pages /Note (/Kids [9 0 R]) '
+            b'% /Kids [8 0 R]\r/Kids [1 % kid object\n0 % kid generation\rR] '
+            b'/Count 1 >>\rendobj\r'
+            b'1 0 obj\r<< /Type /Page /Parent 4 0 R /Note (/Contents 9 0 R) '
+            b'% /Contents 8 0 R\r/Contents 2 % content object\r\n0 R >>\rendobj\r'
+            b'2 % stream header\n0\nobj\n<< /Length 52 >>\nstream\n'
+            b'BT (100% accurate /Pages 77 0 R obj) Tj ET\n9 9 obj\n'
+            b'endstream\nendobj\ntrailer\n<< /Note (/Root 9 0 R) '
+            b'% /Root 8 0 R\r/Root 3 % root object\n0 R >>\n%%EOF\n')
+
+
+def rooted_extra_catalog_pdf():
+    return (b'%PDF-1.4\n'
+            b'1 0 obj\n<< /Type /Page /Parent 5 0 R /Contents 3 0 R >>\nendobj\n'
+            b'2 0 obj\n<< /Type /Page /Parent 5 0 R /Contents 4 0 R >>\nendobj\n'
+            b'3 0 obj\n<< /Length 28 >>\nstream\nBT (Object First) Tj ET\nendstream\nendobj\n'
+            b'4 0 obj\n<< /Length 29 >>\nstream\nBT (Logical First) Tj ET\nendstream\nendobj\n'
+            b'5 0 obj\n<< /Type /Pages /Kids [2 0 R 1 0 R] /Count 2 >>\nendobj\n'
+            b'6 0 obj\n<< /Type /Catalog /Pages 5 0 R >>\nendobj\n'
+            b'7 0 obj\n<< /Type /Pages /Kids [1 0 R 2 0 R] /Count 2 >>\nendobj\n'
+            b'8 0 obj\n<< /Type /Catalog /Pages 7 0 R >>\nendobj\n'
+            b'trailer\n<< /Root 6 0 R >>\n%%EOF\n')
+
 def oversized_pdf_number(location):
     huge = b'9' * 5000
     if location == 'declaration':
@@ -95,6 +123,31 @@ def malformed_pdf_reference(location, value):
 
 
 class SourceIngestionTests(unittest.TestCase):
+    def test_comments_cr_headers_and_keys_inside_strings_are_parsed_safely(self):
+        paper = self.root / 'comments.pdf'
+        paper.write_bytes(commented_reference_pdf())
+        ingest_source(self.home, self.run['run_id'],
+                      validate_source_input(self.input('pdf', paper), self.root))
+        run_dir, _ = load_run(self.home, self.run['run_id'])
+        bundle = json.loads((run_dir / 'source.json').read_text(encoding='utf-8'))
+        text = (run_dir / bundle['sections'][0]['text_path']).read_text(encoding='utf-8')
+        self.assertEqual(text.strip(), '100% accurate /Pages 77 0 R obj')
+        self.assertEqual(bundle['sections'][0]['locator'], {'kind': 'page', 'value': '1'})
+
+    def test_trailer_root_selects_catalog_when_an_unused_catalog_exists(self):
+        paper = self.root / 'rooted-extra-catalog.pdf'
+        paper.write_bytes(rooted_extra_catalog_pdf())
+        ingest_source(self.home, self.run['run_id'],
+                      validate_source_input(self.input('pdf', paper), self.root))
+        run_dir, _ = load_run(self.home, self.run['run_id'])
+        bundle = json.loads((run_dir / 'source.json').read_text(encoding='utf-8'))
+        texts = [(run_dir / item['text_path']).read_text(encoding='utf-8')
+                 for item in bundle['sections']]
+        self.assertIn('Logical First', texts[0])
+        self.assertIn('Object First', texts[1])
+        self.assertEqual([item['locator']['value'] for item in bundle['sections']], ['1', '2'])
+        self.assertNotIn('PDF_PAGE_ORDER_UNVERIFIED', bundle['warnings'])
+
     def test_leading_zero_object_headers_and_references_ingest_successfully(self):
         paper = self.root / 'leading-zero.pdf'
         paper.write_bytes(leading_zero_pdf())

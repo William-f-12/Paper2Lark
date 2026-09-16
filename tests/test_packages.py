@@ -153,6 +153,69 @@ class PackageTests(unittest.TestCase):
                 encoding='utf-8')
             self.assertEqual(extracted.strip(), 'Accuracy 95 percent')
 
+    def test_bundled_launcher_honors_root_and_pdf_comments(self):
+        content_one = b'BT (Logical First) Tj ET'
+        content_two = b'BT (Object First) Tj ET'
+        pdf_payload = (
+            b'%PDF-1.4\r'
+            b'1 % page one header\r\n0 % generation\robj\r'
+            b'<< /Type /Page /Parent 5 0 R /Contents 3 % ref\r0 R >>\rendobj\r'
+            b'2 0 obj\r<< /Type /Page /Parent 5 0 R /Contents 4 0 R >>\rendobj\r'
+            b'3 0 obj\r<< /Length 24 >>\rstream\r\n' + content_one
+            + b'\r\n9 9 obj /Type /Catalog /Pages 7 0 R\r\nendstream\rendobj\r'
+            b'4 0 obj\r<< /Length 23 >>\rstream\r\n' + content_two
+            + b'\r\nendstream\rendobj\r'
+            b'5 0 obj\r<< /Type /Pages /Kids [2 % first\r0 R 1 0 R] /Count 2 >>\rendobj\r'
+            b'6 0 obj\r<< /Type /Catalog (fake /Pages 7 0 R) '
+            b'% /Pages 7 0 R\r/Pages 5 0 R >>\rendobj\r'
+            b'7 0 obj\r<< /Type /Pages /Kids [1 0 R 2 0 R] /Count 2 >>\rendobj\r'
+            b'8 0 obj\r<< /Type /Catalog /Pages 7 0 R >>\rendobj\r'
+            b'trailer\r<< (/Root 8 0 R) % /Root 8 0 R\r/Root 6 % root ref\r0 R >>\r'
+            b'%%EOF\r')
+        with tempfile.TemporaryDirectory(prefix='p2l-packaged-pdf-root-') as folder:
+            base = Path(folder)
+            home = base / 'home'
+            run = create_run(
+                home,
+                {'schema_version': 1, 'persist_to_library': False,
+                 'requested_depth': 'quick', 'reader_preference': 'builtin',
+                 'force_reread': False, 'record_id': 'recRootedPdf'},
+                {'schema_version': 1, 'document_id': 'doc', 'revision_id': '1',
+                 'content_digest': 'b' * 64, 'raw_content': '# Notes', 'blocks': []},
+                {'schema_version': 1, 'missing_work': ['source_bundle']})
+            pdf = base / 'paper.pdf'
+            pdf.write_bytes(pdf_payload)
+            source_input = base / 'source.json'
+            source_input.write_text(json.dumps({
+                'schema_version': 1, 'kind': 'pdf', 'path': str(pdf),
+                'original_location': 'rooted comment fixture', 'metadata': {},
+            }), encoding='utf-8')
+            marker = base / 'provider-called'
+            fake_cli = base / 'fake-lark.py'
+            fake_cli.write_text(
+                'from pathlib import Path\nPath(r"' + str(marker) + '").write_text("called")\n',
+                encoding='utf-8')
+            package = ROOT / 'dist/codex/plugins/paper2lark'
+            result = subprocess.run([
+                sys.executable, str(package / 'scripts/paper2lark.py'),
+                '--home', str(home), '--lark-cli', str(fake_cli),
+                'sources', 'ingest', '--run', run['run_id'], '--input', str(source_input),
+            ], cwd=base, capture_output=True, text=True, encoding='utf-8')
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            documents = [line for line in result.stdout.splitlines() if line.strip()]
+            self.assertEqual(len(documents), 1, result.stdout)
+            response = json.loads(documents[0])
+            self.assertTrue(response['ok'])
+            run_dir = home / 'runs' / run['run_id']
+            source = json.loads((run_dir / 'source.json').read_text(encoding='utf-8'))
+            texts = [(run_dir / section['text_path']).read_text(encoding='utf-8').strip()
+                     for section in source['sections']]
+            self.assertEqual(texts, ['Object First', 'Logical First'])
+            self.assertEqual([section['locator']['value'] for section in source['sections']],
+                             ['1', '2'])
+            self.assertNotIn('Traceback', result.stderr)
+            self.assertFalse(marker.exists())
+
     def test_bundled_launcher_structures_malformed_pdf_references(self):
         huge = b'9' * 5000
 
