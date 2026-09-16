@@ -1,7 +1,9 @@
 import copy
 import json
+import sqlite3
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 import sys
 from unittest.mock import patch
@@ -221,6 +223,34 @@ class PublicationTests(unittest.TestCase):
         return apply_publication(self.home, self.binding, self.settings, run_id, plan,
                                  self.runner, self.gateway, documents=self.documents)
 
+    def reserve(self, run_id):
+        _, run = load_run(self.home, run_id)
+        return state.reserve_run(
+            self.home, self.binding['library_id'], run['paper_uid'], run_id)
+
+    def strand_publication_result(self, before_apply=None):
+        run_id = self.drafted_run()
+        self.reserve(run_id)
+        plan = json.loads(Path(self.plan(run_id)['plan_path']).read_text(encoding='utf-8'))
+        if before_apply is not None:
+            before_apply()
+
+        def interrupt_after_result(home, current_run_id, previous, target, artifacts,
+                                   submission=None):
+            if target == 'completed':
+                raise Paper2LarkError('SYNTHETIC_CRASH', 'after result write')
+            return transition_run(home, current_run_id, previous, target, artifacts,
+                                  submission=submission)
+
+        with patch('paper2lark.publishing.transition_run',
+                   side_effect=interrupt_after_result):
+            with self.assertRaises(Paper2LarkError) as raised:
+                self.apply(run_id, plan)
+        self.assertEqual(raised.exception.code, 'SYNTHETIC_CRASH')
+        run_dir, interrupted = load_run(self.home, run_id)
+        self.assertEqual(interrupted['status'], 'updating_index')
+        return run_id, plan, run_dir, interrupted
+
     def test_plan_rejects_draft_only_stale_template_and_incomplete_full_read(self):
         with self.assertRaises(Paper2LarkError) as raised:
             self.plan(self.drafted_run(persist=False))
@@ -429,6 +459,164 @@ class PublicationTests(unittest.TestCase):
         self.assertTrue(self.apply(run_id, plan)['remote_mutations'])
         self.assertFalse(self.apply(run_id, plan)['remote_mutations'])
 
+    def test_retry_adopts_stranded_result_without_recomputing_historical_warnings(self):
+        run_id, plan, run_dir, interrupted = self.strand_publication_result(
+            lambda: self.gateway.record['fields'].update(reading_status=['Paused']))
+        result_path = run_dir / 'publication-result.json'
+        historical = result_path.read_bytes()
+        self.assertEqual(json.loads(historical)['warnings'], ['STATUS_CHANGED'])
+
+        self.gateway.record['fields']['keywords'] = ['AI Agents']
+        create_calls = self.documents.create_calls
+        update_calls = self.gateway.update_calls
+        result = self.apply(run_id, plan)
+
+        self.assertEqual(result['warnings'], ['STATUS_CHANGED'])
+        self.assertFalse(result['remote_mutations'])
+        self.assertEqual(result_path.read_bytes(), historical)
+        self.assertEqual(self.documents.create_calls, create_calls)
+        self.assertEqual(self.gateway.update_calls, update_calls)
+        self.assertIsNone(state.get_active_run(
+            self.home, self.binding['library_id'], interrupted['paper_uid']))
+
+    def test_stranded_result_rejects_malformed_duplicate_and_mismatched_fields(self):
+        run_id, plan, run_dir, interrupted = self.strand_publication_result()
+        result_path = run_dir / 'publication-result.json'
+        original = result_path.read_bytes()
+        valid = json.loads(original)
+        wrong_run = str(uuid.uuid4())
+        cases = {
+            'missing_field': {key: value for key, value in valid.items()
+                              if key != 'document_id'},
+            'wrong_run': {**valid, 'run_id': wrong_run},
+            'wrong_record': {**valid, 'record_id': 'recOther'},
+            'wrong_document': {**valid, 'document_id': 'doc-other'},
+            'wrong_url': {**valid, 'note_url': 'https://example.test/wiki/other'},
+            'wrong_warnings': {**valid, 'warnings': ['STATUS_CHANGED']},
+            'non_string_warning': {**valid, 'warnings': [['STATUS_CHANGED']]},
+        }
+        create_calls = self.documents.create_calls
+        update_calls = self.gateway.update_calls
+        for label, value in cases.items():
+            with self.subTest(label=label):
+                result_path.write_text(json.dumps(value), encoding='utf-8')
+                with self.assertRaises(Paper2LarkError) as raised:
+                    self.apply(run_id, plan)
+                self.assertIn(raised.exception.code, {'RUN_INVALID', 'RUN_STATE_CONFLICT'})
+                self.assertEqual(result_path.read_text(encoding='utf-8'), json.dumps(value))
+                self.assertEqual(load_run(self.home, run_id)[1]['status'], 'updating_index')
+                self.assertEqual(self.documents.create_calls, create_calls)
+                self.assertEqual(self.gateway.update_calls, update_calls)
+        result_path.write_bytes(
+            b'{"schema_version":1,"schema_version":1}')
+        with self.assertRaises(Paper2LarkError) as raised:
+            self.apply(run_id, plan)
+        self.assertEqual(raised.exception.code, 'RUN_INVALID')
+        result_path.write_bytes(original)
+
+    def test_stranded_result_requires_verified_operations_and_saved_baseline(self):
+        run_id = self.drafted_run()
+        self.reserve(run_id)
+        plan = json.loads(Path(self.plan(run_id)['plan_path']).read_text(encoding='utf-8'))
+        run_dir, _ = load_run(self.home, run_id)
+        transition_run(self.home, run_id, 'planned', 'publishing_note', {})
+        transition_run(self.home, run_id, 'publishing_note', 'note_verified', {})
+        transition_run(self.home, run_id, 'note_verified', 'updating_index', {})
+        write_artifact(run_dir, 'publication-result.json', {
+            'schema_version': 1, 'run_id': run_id, 'status': 'completed',
+            'note_url': 'https://example.test/wiki/node-created',
+            'document_id': 'doc-created', 'record_id': plan['record_id'],
+            'warnings': [], 'remote_mutations': True})
+        with self.assertRaises(Paper2LarkError) as raised:
+            self.apply(run_id, plan)
+        self.assertEqual(raised.exception.code, 'RUN_INVALID')
+        self.assertEqual(self.documents.create_calls, 0)
+        self.assertEqual(self.gateway.update_calls, 0)
+
+        state.release_run(
+            self.home, self.binding['library_id'],
+            load_run(self.home, run_id)[1]['paper_uid'], run_id)
+        stranded_id, stranded_plan, _, _ = self.strand_publication_result()
+        conn = sqlite3.connect(self.home / 'state.sqlite3')
+        try:
+            conn.execute("UPDATE operations SET outcome='applied' WHERE run_id=? AND sequence=1",
+                         (stranded_id,))
+            conn.commit()
+        finally:
+            conn.close()
+        with self.assertRaises(Paper2LarkError) as raised:
+            self.apply(stranded_id, stranded_plan)
+        self.assertEqual(raised.exception.code, 'RUN_INVALID')
+
+    def test_stranded_result_rejects_wrong_baseline_binding_and_owner(self):
+        run_id, plan, run_dir, interrupted = self.strand_publication_result()
+        latest = state.latest_baseline(
+            self.home, self.binding['library_id'], interrupted['paper_uid'])
+        state.save_baseline(
+            self.home, self.binding['library_id'], interrupted['paper_uid'],
+            'doc-other', latest['node_token'], latest['note_url'],
+            latest['content_digest'], latest['document_revision'], latest['record'])
+        with self.assertRaises(Paper2LarkError) as raised:
+            self.apply(run_id, plan)
+        self.assertEqual(raised.exception.code, 'RUN_INVALID')
+
+        bad_binding = copy.deepcopy(self.binding)
+        bad_binding['original_urls']['wiki_url'] = 'https://other.example/wiki/parent'
+        with self.assertRaises(Paper2LarkError) as raised:
+            apply_publication(self.home, bad_binding, self.settings, run_id, plan,
+                              self.runner, self.gateway, documents=self.documents)
+        self.assertEqual(raised.exception.code, 'BINDING_CONFLICT')
+
+        state.release_run(
+            self.home, self.binding['library_id'], interrupted['paper_uid'], run_id)
+        newer = str(uuid.uuid4())
+        state.reserve_run(
+            self.home, self.binding['library_id'], interrupted['paper_uid'], newer)
+        with self.assertRaises(Paper2LarkError) as raised:
+            self.apply(run_id, plan)
+        self.assertEqual(raised.exception.code, 'ACTIVE_RUN_CONFLICT')
+        self.assertEqual(state.get_active_run(
+            self.home, self.binding['library_id'], interrupted['paper_uid'])['run_id'], newer)
+
+    def test_completed_manifest_retry_releases_only_its_exact_reservation(self):
+        run_id = self.drafted_run()
+        reservation = self.reserve(run_id)
+        plan = json.loads(Path(self.plan(run_id)['plan_path']).read_text(encoding='utf-8'))
+        with patch('paper2lark.publishing.state.release_run',
+                   side_effect=Paper2LarkError('SYNTHETIC_CRASH', 'before release')):
+            with self.assertRaises(Paper2LarkError) as raised:
+                self.apply(run_id, plan)
+        self.assertEqual(raised.exception.code, 'SYNTHETIC_CRASH')
+        self.assertEqual(load_run(self.home, run_id)[1]['status'], 'completed')
+        create_calls = self.documents.create_calls
+        update_calls = self.gateway.update_calls
+
+        result = self.apply(run_id, plan)
+        self.assertFalse(result['remote_mutations'])
+        self.assertEqual(self.documents.create_calls, create_calls)
+        self.assertEqual(self.gateway.update_calls, update_calls)
+        self.assertIsNone(state.get_active_run(
+            self.home, self.binding['library_id'], reservation['paper_uid']))
+
+    def test_completed_manifest_retry_never_releases_a_newer_owner(self):
+        run_id = self.drafted_run()
+        reservation = self.reserve(run_id)
+        plan = json.loads(Path(self.plan(run_id)['plan_path']).read_text(encoding='utf-8'))
+        with patch('paper2lark.publishing.state.release_run',
+                   side_effect=Paper2LarkError('SYNTHETIC_CRASH', 'before release')):
+            with self.assertRaises(Paper2LarkError):
+                self.apply(run_id, plan)
+        state.release_run(
+            self.home, self.binding['library_id'], reservation['paper_uid'], run_id)
+        newer = str(uuid.uuid4())
+        state.reserve_run(
+            self.home, self.binding['library_id'], reservation['paper_uid'], newer)
+
+        with self.assertRaises(Paper2LarkError) as raised:
+            self.apply(run_id, plan)
+        self.assertEqual(raised.exception.code, 'ACTIVE_RUN_CONFLICT')
+        self.assertEqual(state.get_active_run(
+            self.home, self.binding['library_id'], reservation['paper_uid'])['run_id'], newer)
     def test_explicit_cancel_releases_a_blocked_run_and_retains_artifacts(self):
         run_id = self.drafted_run()
         _, run = load_run(self.home, run_id)

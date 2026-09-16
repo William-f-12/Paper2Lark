@@ -11,6 +11,7 @@ from . import state
 from .bindings import assert_account, digest, nested_object, validate_binding
 from .documents import LarkDocuments
 from .errors import Paper2LarkError
+from .jsonutil import loads as strict_json_loads
 from .keywords import reconcile_keywords
 from .locking import library_lock
 from .runs import (load_run, run_lock, transition_run, verify_run_artifacts,
@@ -39,7 +40,7 @@ def _read_json(path):
         raw = Path(path).read_bytes()
         if len(raw) > 4 * 1024 * 1024:
             raise ValueError
-        value = json.loads(raw.decode('utf-8'))
+        value = strict_json_loads(raw.decode('utf-8', errors='strict'))
     except (OSError, UnicodeError, ValueError, RecursionError):
         _error('RUN_INVALID', 'A required publication artifact is unreadable.')
     if not isinstance(value, dict):
@@ -486,6 +487,133 @@ def _finish_index(home, binding, settings, run_id, run_dir, plan, note, gateway)
     return result
 
 
+def _stranded_result_artifact(run_dir):
+    path = run_dir / 'publication-result.json'
+    if path.is_symlink():
+        _error('RUN_INVALID', 'A stranded publication result has an unsafe path.')
+    if not path.exists():
+        return None
+    try:
+        if not path.is_file() or path.resolve(strict=True).parent != run_dir:
+            raise OSError
+    except (OSError, RuntimeError):
+        _error('RUN_INVALID', 'A stranded publication result has an unsafe path.')
+    return _read_json(path), _file_artifact(path)
+
+
+def _verified_completion_operations(home, binding, run_id, plan):
+    note_operation = state.get_operation(home, run_id, 1)
+    index_operation = state.get_operation(home, run_id, 2)
+    expected_note = (
+        'create_note', binding['wiki']['notes_parent'], plan['publication_sha256'],
+        {'children': plan['before_children']},
+        {'title': plan['title'], 'markers': plan['markers'],
+         'content_sha256': plan['publication_sha256']})
+    if (note_operation is None or note_operation['outcome'] != 'verified'
+            or (note_operation['kind'], note_operation['target'],
+                note_operation['request_digest'], note_operation['before'],
+                note_operation['desired']) != expected_note):
+        _error('RUN_INVALID', 'The stranded publication result has no matching verified note operation.')
+    note = _note_from_operation(binding, note_operation)
+    response = note_operation.get('response')
+    receipt_keys = {'document_id', 'node_token', 'revision_id', 'content_sha256', 'note_url'}
+    if (set(response) != receipt_keys
+            or not note['document_id'] or not note['node_token']
+            or note['revision_id'] < 0
+            or note_operation.get('remote_id') != note['document_id']
+            or response.get('content_sha256') != plan['publication_sha256']
+            or response.get('note_url') != note['note_url']):
+        _error('RUN_INVALID', 'The stranded publication note receipt does not match the plan.')
+
+    desired = {**plan['desired_record'], 'note_url': note['note_url']}
+    expected_index = (
+        'update_index', plan['record_id'],
+        _sha({'before': plan['expected_record'], 'desired': desired}),
+        {'fields': plan['expected_record']}, {'fields': desired})
+    if (index_operation is None or index_operation['outcome'] != 'verified'
+            or (index_operation['kind'], index_operation['target'],
+                index_operation['request_digest'], index_operation['before'],
+                index_operation['desired']) != expected_index
+            or index_operation.get('remote_id') != plan['record_id']):
+        _error('RUN_INVALID', 'The stranded publication result has no matching verified index operation.')
+    index_response = index_operation.get('response')
+    changed = index_response.get('fields') if isinstance(index_response, dict) else None
+    if (not isinstance(index_response, dict) or set(index_response) != {'fields'}
+            or not isinstance(changed, dict)
+            or any(key not in desired or not _same(desired[key], value)
+                   for key, value in changed.items())):
+        _error('RUN_INVALID', 'The stranded publication index receipt does not match the plan.')
+    return note, changed
+
+
+def _adopt_stranded_result(home, binding, run_id, run_dir, run, plan):
+    stranded = _stranded_result_artifact(run_dir)
+    if stranded is None:
+        return None
+    result, descriptor = stranded
+    allowed = {'schema_version', 'run_id', 'status', 'note_url', 'document_id',
+               'record_id', 'warnings', 'remote_mutations'}
+    warnings = result.get('warnings')
+    if (set(result) != allowed or result.get('schema_version') != 1
+            or result.get('run_id') != run_id or result.get('status') != 'completed'
+            or result.get('record_id') != plan['record_id']
+            or not isinstance(result.get('document_id'), str)
+            or not isinstance(result.get('note_url'), str)
+            or result.get('remote_mutations') is not True
+            or not isinstance(warnings, list)
+            or any(not isinstance(item, str) for item in warnings)
+            or len(warnings) != len(set(warnings))
+            or any(item not in {'KEYWORDS_CHANGED', 'STATUS_CHANGED'} for item in warnings)):
+        _error('RUN_INVALID', 'The stranded publication result is malformed or mismatched.')
+    if run['status'] not in {'updating_index', 'failed_retryable'}:
+        _error('RUN_STATE_CONFLICT', 'The run state cannot adopt a stranded publication result.')
+
+    tracked = state.find_paper_by_record(
+        home, binding['library_id'], plan['record_id'])
+    if tracked is None or tracked['paper_uid'] != plan['paper_uid']:
+        _error('BINDING_CONFLICT', 'The stranded result does not belong to the bound paper record.')
+    reservation = state.get_run_reservation(home, run_id)
+    expected_owner = (binding['library_id'], plan['paper_uid'], run_id,
+                      digest(binding), binding['base_token'], binding['table_id'])
+    actual_owner = (None if reservation is None else
+                    (reservation['library_id'], reservation['paper_uid'],
+                     reservation['run_id'], reservation['binding_digest'],
+                     reservation['base_token'], reservation['table_id']))
+    if actual_owner != expected_owner:
+        active = state.get_active_run(home, binding['library_id'], plan['paper_uid'])
+        if active is not None and active['run_id'] != run_id:
+            _error('ACTIVE_RUN_CONFLICT', 'A different run owns the paper reservation.')
+        _error('RUN_STATE_CONFLICT', 'The stranded result has no exact active-run owner.')
+
+    note, changed = _verified_completion_operations(home, binding, run_id, plan)
+    if (result['document_id'] != note['document_id']
+            or result['note_url'] != note['note_url']):
+        _error('RUN_INVALID', 'The stranded result does not match the verified note identity.')
+    baseline = state.latest_baseline(home, binding['library_id'], plan['paper_uid'])
+    if (baseline is None or baseline['document_id'] != note['document_id']
+            or baseline['node_token'] != note['node_token']
+            or baseline['note_url'] != note['note_url']
+            or baseline['content_digest'] != plan['publication_sha256']
+            or baseline['document_revision'] != note['revision_id']
+            or not isinstance(baseline.get('record'), dict)
+            or any(not _same(baseline['record'].get(key), value)
+                   for key, value in changed.items())):
+        _error('RUN_INVALID', 'The stranded result does not match the saved publication baseline.')
+    desired = {**plan['desired_record'], 'note_url': note['note_url']}
+    if any(not _same(baseline['record'].get(key), desired[key])
+           for key in ('note_url', 'summary')):
+        _error('RUN_INVALID', 'The saved baseline does not contain the committed managed fields.')
+    historical_warnings = [warning for field, warning in (
+        ('keywords', 'KEYWORDS_CHANGED'), ('reading_status', 'STATUS_CHANGED'))
+        if field in desired and not _same(baseline['record'].get(field), desired[field])]
+    if warnings != historical_warnings:
+        _error('RUN_INVALID', 'The stranded result warnings do not match the saved baseline.')
+
+    transition_run(home, run_id, run['status'], 'completed',
+                   {'publication_result': descriptor})
+    state.release_run(home, binding['library_id'], plan['paper_uid'], run_id)
+    return {**result, 'remote_mutations': False}
+
 def apply_publication(home, binding, settings, run_id, plan, runner, gateway,
                       documents=None):
     validate_binding(binding)
@@ -505,6 +633,11 @@ def apply_publication(home, binding, settings, run_id, plan, runner, gateway,
             _error('RUN_STATE_CONFLICT', 'A canceled publication run cannot be applied.')
         if run['status'] == 'blocked_conflict':
             _error('INDEX_CONFLICT', 'The run is blocked by a managed index-field conflict.')
+        with library_lock(home, binding['library_id']):
+            adopted = _adopt_stranded_result(
+                home, binding, run_id, run_dir, run, plan)
+            if adopted is not None:
+                return adopted
         _account(runner, binding, verify=True)
         live_template = _template(runner, binding)
         if (live_template['content_digest'] != plan['template_digest']
