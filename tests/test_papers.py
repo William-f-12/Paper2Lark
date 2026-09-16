@@ -111,6 +111,15 @@ class MemoryGateway:
                 raise Paper2LarkError("RECORD_NOT_FOUND", "The requested record was not found.")
             return copy.deepcopy(self.records[record_id])
 
+    def create_record_id(self, fields):
+        with self._guard:
+            self.counts["create"] += 1
+            if self.create_hook:
+                value = self.create_hook(self, copy.deepcopy(fields))
+                return value.get("record_id") if isinstance(value, dict) else value
+            record_id = f"recCreated{self.counts['create']}"
+            self.records[record_id] = record(record_id, **copy.deepcopy(fields))
+            return record_id
     def create_record(self, fields):
         with self._guard:
             self.counts["create"] += 1
@@ -544,7 +553,7 @@ class CollectionTests(PaperServiceCase):
         gateway = MemoryGateway(self.binding)
         gateway.create_hook = lambda gw, fields: None
 
-        self.assert_error("CLI_OUTPUT_INVALID", lambda: collect_paper(
+        self.assert_error("CLI_PARTIAL_RESULT", lambda: collect_paper(
             self.home, self.binding, self.settings, request, gateway, apply=True))
 
     def test_malformed_update_record_result_raises_stable_error(self):
@@ -752,6 +761,58 @@ class CollectionTests(PaperServiceCase):
         self.assertTrue(any(isinstance(item, dict) for item in outcomes))
         self.assertTrue(all(isinstance(item, dict) or item == "LIBRARY_BUSY" for item in outcomes), outcomes)
 
+    def test_uncertain_create_never_retries_after_metadata_edits(self):
+        self.init_state()
+        request = self.add({"kind": "doi", "value": "10.1000/journal-timeout"}, title="Original")
+        gateway = MemoryGateway(self.binding)
+        gateway.create_hook = lambda gw, fields: (_ for _ in ()).throw(
+            Paper2LarkError("REMOTE_RESULT_UNCERTAIN", "result lost after commit"))
+        self.assert_error("REMOTE_RESULT_UNCERTAIN", lambda: collect_paper(
+            self.home, self.binding, self.settings, request, gateway, apply=True))
+        changed = copy.deepcopy(request)
+        changed["metadata"]["title"] = "Edited metadata cannot create again"
+        self.assert_error("COLLECTION_RESULT_UNCERTAIN", lambda: collect_paper(
+            self.home, self.binding, self.settings, changed, gateway, apply=True))
+        self.assertEqual(gateway.counts["create"], 1)
+
+    def test_known_journal_id_reconciles_without_a_second_create(self):
+        self.init_state()
+        request = self.add({"kind": "doi", "value": "10.1000/journal-created"})
+        gateway = MemoryGateway(self.binding)
+        failures = {"left": 1}
+        def interrupt_readback(gw, record_id):
+            if failures["left"]:
+                failures["left"] -= 1
+                raise Paper2LarkError("RECORD_NOT_FOUND", "interrupted readback")
+        gateway.get_hook = interrupt_readback
+        self.assert_error("RECORD_NOT_FOUND", lambda: collect_paper(
+            self.home, self.binding, self.settings, request, gateway, apply=True))
+        gateway.get_hook = None
+        result = collect_paper(self.home, self.binding, self.settings, request, gateway, apply=True)
+        self.assertEqual(gateway.counts["create"], 1)
+        self.assertEqual(result["record_id"], "recCreated1")
+        self.assertIsNotNone(state.find_paper(
+            self.home, self.binding["library_id"], request["source"]["aliases"]))
+
+    def test_explicit_adoption_requires_exact_frozen_fields(self):
+        self.init_state()
+        request = self.add({"kind": "doi", "value": "10.1000/journal-adopt"})
+        gateway = MemoryGateway(self.binding)
+        gateway.create_hook = lambda gw, fields: (_ for _ in ()).throw(
+            Paper2LarkError("REMOTE_RESULT_UNCERTAIN", "result lost after commit"))
+        self.assert_error("REMOTE_RESULT_UNCERTAIN", lambda: collect_paper(
+            self.home, self.binding, self.settings, request, gateway, apply=True))
+        planned = {"title": request["metadata"]["title"], "paper_key": "doi:10.1000/journal-adopt",
+                   "keywords": [], "reading_status": ["To Read"]}
+        gateway.records["recWrong"] = record("recWrong", **{**planned, "title": "wrong"})
+        self.assert_error("COLLECTION_RESULT_UNCERTAIN", lambda: collect_paper(
+            self.home, self.binding, self.settings, request, gateway, apply=True, adopt_record="recWrong"))
+        del gateway.records["recWrong"]
+        gateway.records["recAdopt"] = record("recAdopt", **planned)
+        result = collect_paper(self.home, self.binding, self.settings, request, gateway,
+                               apply=True, adopt_record="recAdopt")
+        self.assertEqual(result["record_id"], "recAdopt")
+        self.assertEqual(gateway.counts["create"], 1)
 
 class QueryTests(PaperServiceCase):
     def test_query_filters_intersect_truncate_and_return_canonical_vocabulary(self):

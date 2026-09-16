@@ -54,6 +54,7 @@ def parser():
     add = paper_actions.add_parser('add', help='Preview or apply fill-only paper collection')
     add.add_argument('--input', required=True)
     add.add_argument('--apply', action='store_true')
+    add.add_argument('--adopt-record')
     listing = paper_actions.add_parser('list', help='Query papers without changing them')
     listing.add_argument('--query')
     update = paper_actions.add_parser('update', help='Preview or apply explicit field changes')
@@ -214,13 +215,15 @@ def execute(args):
         binding = load_binding(home, profile)
         if binding is None:
             raise Paper2LarkError('BINDING_MISSING', 'No existing library is bound to this profile.')
+        if args.action == 'add' and args.adopt_record and not args.apply:
+            raise Paper2LarkError('USAGE', '--adopt-record requires --apply.')
         if args.action in ('add', 'update') and args.apply:
             require_apply_state(home)
         runner = LarkRunner(loaded['settings']['lark'].get('cli'))
         gateway = LarkBase(runner, home, binding)
         if args.action == 'add':
             return collect_paper(home, binding, loaded['settings'], request, gateway,
-                                 apply=args.apply), 0
+                                 apply=args.apply, adopt_record=args.adopt_record), 0
         if args.action == 'update':
             return update_paper(home, binding, loaded['settings'], request, gateway,
                                 apply=args.apply), 0

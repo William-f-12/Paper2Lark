@@ -42,7 +42,7 @@ def build():
         files = {'__main__.py': b'from paper2lark.__main__ import main\nraise SystemExit(main())\n'}
         for name in ('__init__.py', '__main__.py', 'errors.py', 'jsonutil.py', 'config.py',
                      'state.py', 'lark.py', 'bindings.py', 'doctor.py', 'contracts.py',
-                     'locking.py', 'identity.py', 'keywords.py', 'base.py', 'papers.py',
+                     'locking.py', 'identity.py', 'keywords.py', 'collection_journal.py', 'base.py', 'papers.py',
                      'runs.py', 'sources.py', 'templates.py', 'reading.py',
                      'documents.py', 'publishing.py', 'setup.py', 'setup_assets.py',
                      'provisioning.py', 'keywords.en.json'):

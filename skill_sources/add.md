@@ -20,6 +20,6 @@ Collect only. Do not fetch the paper, create a note, summarize it, or invoke doc
 
 4. Run `papers add --input REQUEST` without `--apply`. Parse its one JSON result. Inspect `action`, field changes, canonical keywords, and vocabulary additions. Stop on an error or an unexpected preview.
 
-5. Add `--apply` only when the user authorized collection. Inspect its parsed result. If its error code is `STATE_UNINITIALIZED`, run `python LAUNCHER [GLOBAL_OPTIONS] state init` once; retry that same apply once only after state init succeeds. Inspect the retry result. Do not retry uncertain remote writes or any other failure.
+5. Add `--apply` only when the user authorized collection. Inspect its parsed result. If its error code is `STATE_UNINITIALIZED`, run `python LAUNCHER [GLOBAL_OPTIONS] state init` once; retry that same apply once only after state init succeeds. Inspect the retry result. Do not retry uncertain remote writes or any other failure. For `COLLECTION_RESULT_UNCERTAIN`, inspect the private collection operation artifact and use `papers add --input REQUEST --apply --adopt-record RECORD_ID` only after verifying the exact intended row in the bound table.
 
 6. Remove the temporary files. Report `create`, `fill`, or `noop`; record identity only when returned; keyword additions; and `remote_mutations`. A successful repeat may be `noop` with no remote mutation.

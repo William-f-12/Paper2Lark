@@ -90,7 +90,7 @@ class PackageTests(unittest.TestCase):
             'paper2lark/errors.py', 'paper2lark/jsonutil.py', 'paper2lark/config.py',
             'paper2lark/state.py', 'paper2lark/lark.py', 'paper2lark/bindings.py',
             'paper2lark/doctor.py', 'paper2lark/contracts.py', 'paper2lark/locking.py',
-            'paper2lark/identity.py', 'paper2lark/keywords.py', 'paper2lark/base.py',
+            'paper2lark/identity.py', 'paper2lark/keywords.py', 'paper2lark/collection_journal.py', 'paper2lark/base.py',
             'paper2lark/papers.py', 'paper2lark/runs.py', 'paper2lark/sources.py',
             'paper2lark/templates.py', 'paper2lark/reading.py',
             'paper2lark/documents.py', 'paper2lark/publishing.py',

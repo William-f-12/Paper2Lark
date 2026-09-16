@@ -213,7 +213,8 @@ class LarkBase:
             raise Paper2LarkError('WRITE_VERIFICATION_FAILED', 'The record does not contain the intended field values.')
         return record
 
-    def create_record(self, fields):
+    def create_record_id(self, fields):
+        """Dispatch one create and return its durable response identity only."""
         refreshed, _ = self._preflight()
         encoded = self._encoded(fields, refreshed)
         payload = json.dumps({'create_records': [encoded]}, ensure_ascii=False, separators=(',', ':'),
@@ -224,7 +225,12 @@ class LarkBase:
         if (not isinstance(identifiers, list) or len(identifiers) != 1
                 or not valid_record_id(identifiers[0])):
             raise Paper2LarkError('CLI_PARTIAL_RESULT', 'The create response did not identify exactly one record.')
-        return self._verify(self.get_record(identifiers[0]), fields)
+        return identifiers[0]
+
+    def create_record(self, fields):
+        """Create and verify one record; collection uses the split methods for recovery."""
+        record_id = self.create_record_id(fields)
+        return self._verify(self.get_record(record_id), fields)
 
     def update_record(self, record_id, fields, expected_fields=None):
         if not valid_record_id(record_id):

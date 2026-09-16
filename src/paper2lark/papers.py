@@ -6,6 +6,7 @@ import re
 
 from . import state
 from .bindings import compatible, digest, validate_binding, validate_fields
+from .collection_journal import begin_intent, find_pending, finish_intent, record_created, verify_intent
 from .contracts import ContractError, source_url
 from .errors import Paper2LarkError
 from .identity import normalize_source, validate_update_request
@@ -443,12 +444,22 @@ def _preflight_collection_state(home, binding, identity, plan):
                           binding["table_id"], _state_identity(identity), record_id)
 
 
-def collect_paper(home, binding, settings, request, gateway, apply=False):
+def _journal_fields_match(record, fields):
+    return all(_same(key, value, record["fields"].get(key)) for key, value in fields.items())
+
+
+def _collection_uncertain(intent, message):
+    _error("COLLECTION_RESULT_UNCERTAIN", message + " Reconcile private operation " + intent["operation_id"] + ".")
+
+
+def collect_paper(home, binding, settings, request, gateway, apply=False, adopt_record=None):
     """Plan or apply fill-only collection for one already-normalized paper request."""
     validate_binding(binding)
     _settings(settings)
     request = _collection_request(request)
     home = Path(home)
+    if adopt_record is not None and not apply:
+        _error("USAGE", "--adopt-record requires --apply.")
     preview = _collection_plan(home, binding, settings, request, _snapshot(gateway), consult_local=not apply)
     if not apply:
         return copy.deepcopy(preview["public"])
@@ -457,7 +468,38 @@ def collect_paper(home, binding, settings, request, gateway, apply=False):
     with library_lock(home, binding["library_id"]):
         _require_v2(home)
         replan = lambda snapshot: _collection_plan(home, binding, settings, request, snapshot)
+        # Snapshot first verifies the bound account/table for both ordinary retries and adoption.
         plan = replan(_snapshot(gateway))
+        pending = find_pending(home, binding["library_id"], _candidate_aliases(request["source"]))
+        if pending is not None:
+            if pending["account_digest"] != digest(binding["account"]) or pending["binding_digest"] != digest(binding):
+                _collection_uncertain(pending, "The matching collection operation belongs to a different binding.")
+            if pending["state"] == "intended":
+                if adopt_record is None:
+                    _collection_uncertain(pending, "The record-create result is unknown.")
+                record_id = _record_id(adopt_record, "COLLECTION_RESULT_UNCERTAIN")
+                current = _gateway_record(gateway.get_record(record_id), record_id)
+                if not _journal_fields_match(current, pending["fields"]):
+                    _collection_uncertain(pending, "The adopted record does not contain the frozen intended fields.")
+                pending = record_created(home, pending, record_id)
+            elif adopt_record is not None:
+                _collection_uncertain(pending, "Adoption is only available while the record identity is unknown.")
+            record_id = pending["record_id"]
+            try:
+                current = _gateway_record(gateway.get_record(record_id), record_id)
+            except Paper2LarkError:
+                _collection_uncertain(pending, "The journaled record cannot be read from the bound table.")
+            if not _journal_fields_match(current, pending["fields"]):
+                _collection_uncertain(pending, "The journaled record no longer contains the frozen intended fields.")
+            pending = verify_intent(home, pending)
+            state.sync_paper(home, binding["library_id"], digest(binding), binding["base_token"],
+                             binding["table_id"], _state_identity(request["source"]), record_id)
+            finish_intent(home, pending)
+            result = copy.deepcopy(plan["public"])
+            result.update(record_id=record_id, field_changes={}, vocabulary_additions=[], remote_mutations=False)
+            return result
+        if adopt_record is not None:
+            _error("COLLECTION_RESULT_UNCERTAIN", "No matching uncertain collection operation exists for adoption.")
         if plan["target"] is not None and plan["changes"]:
             latest_snapshot = _snapshot(gateway)
             target_id = plan["target"]["record_id"]
@@ -467,9 +509,17 @@ def collect_paper(home, binding, settings, request, gateway, apply=False):
             home, binding, request["source"], current_plan)
         plan, vocabulary_additions = _extend_and_replan(plan, gateway, replan, state_check)
         mutated = False
+        intent = None
         if plan["target"] is None:
             state_check(plan)
-            verified = _gateway_record(gateway.create_record(copy.deepcopy(plan["changes"])))
+            # The intent reaches disk before dispatch.  A timeout is therefore always uncertain.
+            intent = begin_intent(home, binding, request["source"], plan["changes"])
+            record_id = gateway.create_record_id(copy.deepcopy(plan["changes"]))
+            intent = record_created(home, intent, record_id)
+            verified = _gateway_record(gateway.get_record(record_id), record_id)
+            if not _journal_fields_match(verified, intent["fields"]):
+                _error("WRITE_VERIFICATION_FAILED", "The created record does not contain the intended field values.")
+            intent = verify_intent(home, intent)
             mutated = True
         elif plan["changes"]:
             record_id = plan["target"]["record_id"]
@@ -485,13 +535,13 @@ def collect_paper(home, binding, settings, request, gateway, apply=False):
         record_id = verified["record_id"]
         state.sync_paper(home, binding["library_id"], digest(binding), binding["base_token"],
                          binding["table_id"], _state_identity(request["source"]), record_id)
+        if intent is not None:
+            finish_intent(home, intent)
         result = copy.deepcopy(plan["public"])
         result["record_id"] = record_id
         result["vocabulary_additions"] = vocabulary_additions
         result["remote_mutations"] = mutated or bool(vocabulary_additions)
         return result
-
-
 def _query_request(value):
     if not isinstance(value, dict) or set(value) - {"schema_version", "filters", "limit", "include_vocabulary"}:
         _error("QUERY_INVALID", "Paper query is malformed.")
