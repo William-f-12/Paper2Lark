@@ -3,15 +3,20 @@
 The launcher integrity check runs unchanged; only the child Lark executable is
 replaced by a Python provider. These are not real host/model or Lark E2E tests.
 """
+from contextlib import closing
+import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
+import sqlite3
 import sys
 import tempfile
 import unittest
 import uuid
 import zipfile
+from types import SimpleNamespace
 
 from tests import test_commands as commands
 from tests import test_read_commands as reading
@@ -167,29 +172,121 @@ class ReleaseWorkflowTests(unittest.TestCase):
                 self.assertFalse(recovered['data']['remote_mutations'])
                 self.assertEqual(scenario.provider_path.read_bytes(), before)
 
-    def test_schema_v3_unfinished_run_is_readable_across_release_hosts(self):
-        with tempfile.TemporaryDirectory(prefix='release-schema-v3-') as folder:
-            row = commands.provider_row(
-                'recLegacyRun', title='Legacy Unfinished Run',
-                source_url='https://example.test/legacy-run',
-                paper_key='doi:10.1000/legacy-run',
-                keywords=['Machine Learning'], reading_status=['To Read'])
-            scenario = commands.Scenario(folder, [row])
-            self.host = 'codex'
-            self.init_state(scenario)
-            prepared = self.prepare(scenario, {
-                'schema_version': 1, 'persist_to_library': False,
-                'requested_depth': 'quick', 'reader_preference': 'builtin',
-                'force_reread': False, 'record_id': 'recLegacyRun'})
-            self.assertEqual(state.inspect(scenario.home)['schema_version'], 3)
-            self.assertNotIn('runtime_version', load_run(
-                scenario.home, prepared['run_id'])[1])
-            self.host = 'claude'
-            result, resumed = self.invoke(
-                scenario, 'runs', 'resume', '--run', prepared['run_id'])
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(resumed['data']['status'], 'awaiting_source')
-            self.assertFalse(resumed['data']['remote_mutations'])
+    def test_real_070_schema_v3_unfinished_run_is_read_only_in_both_hosts(self):
+        fixture_root = ROOT / 'tests/fixtures/v0_7_0_home'
+        provenance = json.loads(
+            (fixture_root / 'provenance.json').read_text(encoding='utf-8'))
+        archive = fixture_root / 'home.zip'
+        self.assertEqual(provenance['runtime_version'], '0.7.0')
+        self.assertEqual(
+            provenance['source_commit'],
+            '1d374f7c351532151031f5489d047a1ec08592ba')
+        self.assertEqual(
+            provenance['archive_sha256'],
+            '1d15b960eddf08a0d3f9a01364b74a209c27c502620324946511a2b4f0083cdb')
+        self.assertEqual(
+            hashlib.sha256(archive.read_bytes()).hexdigest(),
+            provenance['archive_sha256'])
+        self.assertEqual(provenance['created_result'], {
+            'schema_version': 3, 'status': 'awaiting_source',
+            'version': '0.7.0'})
+        self.assertEqual(
+            provenance['validated_result'], provenance['created_result'])
+        with zipfile.ZipFile(archive) as stream:
+            for member in stream.namelist():
+                if member.endswith('/'):
+                    continue
+                payload = stream.read(member)
+                printable = b'\n'.join(
+                    re.findall(rb'[\x20-\x7e]{8,}', payload))
+                for marker in (
+                        b'/Users/', b'\\Users\\', b'/home/',
+                        b'larksuite.com', b'__PAPER2LARK_HOME__\\'):
+                    self.assertNotIn(marker, printable, member)
+                self.assertIsNone(
+                    re.search(rb'(?i)[a-z]:[\\/]', printable), member)
+
+        def relocate(value, home_text):
+            if isinstance(value, str):
+                return value.replace('__PAPER2LARK_HOME__', home_text)
+            if isinstance(value, list):
+                return [relocate(item, home_text) for item in value]
+            if isinstance(value, dict):
+                return {key: relocate(item, home_text)
+                        for key, item in value.items()}
+            return value
+
+        def materialize(base):
+            home = base / 'legacy 0.7.0 home'
+            with zipfile.ZipFile(archive) as stream:
+                self.assertEqual(
+                    set(stream.namelist()), set(provenance['archive_members']))
+                stream.extractall(home)
+            run_dir = home / 'runs' / provenance['run_id']
+            handoff_path = run_dir / 'handoff.json'
+            handoff = relocate(
+                json.loads(handoff_path.read_text(encoding='utf-8')),
+                home.as_posix())
+            handoff_bytes = (
+                json.dumps(handoff, sort_keys=True, separators=(',', ':'))
+                + '\n').encode('utf-8')
+            handoff_path.write_bytes(handoff_bytes)
+            manifest_path = run_dir / 'run.json'
+            manifest = relocate(
+                json.loads(manifest_path.read_text(encoding='utf-8')),
+                home.as_posix())
+            manifest['artifacts']['handoff'].update(
+                sha256=hashlib.sha256(handoff_bytes).hexdigest(),
+                size_bytes=len(handoff_bytes))
+            manifest_path.write_text(
+                json.dumps(manifest, sort_keys=True, separators=(',', ':'))
+                + '\n', encoding='utf-8')
+            return home
+
+        def snapshot(home):
+            return {
+                path.relative_to(home).as_posix():
+                    hashlib.sha256(path.read_bytes()).hexdigest()
+                for path in home.rglob('*') if path.is_file()
+            }
+
+        for host in self.packages:
+            with self.subTest(host=host), tempfile.TemporaryDirectory(
+                    prefix=f'real-070-{host}-') as folder:
+                base = Path(folder)
+                home = materialize(base)
+                with closing(sqlite3.connect(
+                        f'{home.joinpath("state.sqlite3").as_uri()}?mode=ro',
+                        uri=True)) as connection:
+                    self.assertEqual(connection.execute(
+                        "SELECT value FROM state_metadata "
+                        "WHERE key='schema_version'").fetchone(), ('3',))
+                scenario = SimpleNamespace(
+                    home=home, cwd=base / 'cwd',
+                    provider_script=base / 'provider.py',
+                    provider_path=base / 'provider.json')
+                scenario.cwd.mkdir()
+                scenario.provider_script.write_text(
+                    commands.PROVIDER, encoding='utf-8')
+                scenario.provider_path.write_text(json.dumps({
+                    'account': commands.ACCOUNT, 'fields': commands.FIELDS,
+                    'columns': commands.columns(), 'rows': [],
+                    'calls': [], 'writes': []}), encoding='utf-8')
+                provider_before = scenario.provider_path.read_bytes()
+                before = snapshot(home)
+                self.host = host
+                result, shown = self.invoke(
+                    scenario, 'runs', 'show', '--run', provenance['run_id'])
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(shown['data']['status'], 'awaiting_source')
+                result, resumed = self.invoke(
+                    scenario, 'runs', 'resume', '--run', provenance['run_id'])
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(resumed['data']['status'], 'awaiting_source')
+                self.assertFalse(resumed['data']['remote_mutations'])
+                self.assertEqual(snapshot(home), before)
+                self.assertEqual(
+                    scenario.provider_path.read_bytes(), provider_before)
 
     def test_archives_create_library_and_reuse_completed_plan(self):
         for host in self.packages:

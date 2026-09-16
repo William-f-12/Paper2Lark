@@ -11,7 +11,9 @@ class AuditDocumentationTests(unittest.TestCase):
             encoding='utf-8').casefold()
         for defect in range(1, 10):
             self.assertIn(f'a{defect}', report)
-        for marker in ('0.7.1', 'focused test', 'real lark', 'deferred'):
+        for marker in ('0.7.1', 'focused test', 'real lark', 'deferred',
+                       '1d374f7c351532151031f5489d047a1ec08592ba',
+                       '1d15b960eddf08a0d3f9a01364b74a209c27c502620324946511a2b4f0083cdb'):
             self.assertIn(marker, report)
 
     def test_public_guidance_covers_recovery_and_compatibility_boundaries(self):
