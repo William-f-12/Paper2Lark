@@ -474,8 +474,11 @@ def collect_paper(home, binding, settings, request, gateway, apply=False):
         elif plan["changes"]:
             record_id = plan["target"]["record_id"]
             state_check(plan)
+            expected = {key: copy.deepcopy(plan["target"]["fields"].get(key))
+                        for key in plan["changes"]}
             verified = _gateway_record(
-                gateway.update_record(record_id, copy.deepcopy(plan["changes"])), record_id)
+                gateway.update_record(record_id, copy.deepcopy(plan["changes"]),
+                                      expected_fields=expected), record_id)
             mutated = True
         else:
             verified = plan["target"]

@@ -85,11 +85,13 @@ class MemoryGateway:
         self.fields = copy.deepcopy(fields or FIELDS)
         self.records = {item["record_id"]: copy.deepcopy(item) for item in records}
         self.counts = {"snapshot": 0, "get": 0, "create": 0, "update": 0, "replace": 0}
+        self.write_counts = {"create": 0, "update": 0, "replace": 0}
         self.snapshot_hook = None
         self.get_hook = None
         self.replace_hook = None
         self.create_hook = None
         self.update_hook = None
+        self.precondition_hook = None
         self._guard = threading.Lock()
 
     def snapshot(self):
@@ -119,14 +121,21 @@ class MemoryGateway:
             self.records[record_id] = item
             return copy.deepcopy(item)
 
-    def update_record(self, record_id, fields):
+    def update_record(self, record_id, fields, expected_fields=None):
         with self._guard:
             self.counts["update"] += 1
+            if self.precondition_hook:
+                self.precondition_hook(self, record_id, copy.deepcopy(fields))
             if self.update_hook:
                 return self.update_hook(self, record_id, copy.deepcopy(fields))
             if record_id not in self.records:
                 raise Paper2LarkError("RECORD_NOT_FOUND", "The requested record was not found.")
+            if expected_fields is not None:
+                for key, value in expected_fields.items():
+                    if self.records[record_id]["fields"].get(key) != value:
+                        raise Paper2LarkError("INDEX_CONFLICT", "A managed record field changed before the update.")
             self.records[record_id]["fields"].update(copy.deepcopy(fields))
+            self.write_counts["update"] += 1
             return copy.deepcopy(self.records[record_id])
 
     def replace_keyword_field(self, expected_field, field_definition):
@@ -380,6 +389,60 @@ class CollectionTests(PaperServiceCase):
         self.assertFalse(result["remote_mutations"])
         self.assertEqual(gateway.records["recOne"]["fields"]["authors"], "Manual Author")
         self.assertEqual(gateway.counts["update"], 0)
+
+    def test_apply_rejects_human_edit_for_each_fill_field(self):
+        cases = (
+            ("title", record("recOne", title="", paper_key="doi:10.1000/one",
+                             keywords=["AI Agents"], reading_status=["To Read"]),
+             self.add({"kind": "doi", "value": "10.1000/one"}, title="Generated title"), "Human title"),
+            ("reading_status", record("recOne", title="Curated title", paper_key="doi:10.1000/status",
+                                      keywords=["AI Agents"], reading_status=[]),
+             self.add({"kind": "doi", "value": "10.1000/status"}, title="Curated title"), ["Read"]),
+            ("keywords", record("recOne", title="Curated title", paper_key="doi:10.1000/status",
+                                keywords=[], reading_status=["To Read"]),
+             self.add({"kind": "doi", "value": "10.1000/status"}, title="Curated title",
+                      keyword_proposal=proposal(selected=("AI Agents",))), ["Human Curated"]),
+        )
+        for logical, existing, request, human_value in cases:
+            home = self.root / logical
+            state.initialize(home)
+            gateway = MemoryGateway(self.binding, [existing])
+
+            def human_edit_before_gateway_precondition(gw, record_id, fields, key=logical, value=human_value):
+                gw.records[record_id]["fields"][key] = value
+
+            gateway.precondition_hook = human_edit_before_gateway_precondition
+            with self.subTest(logical=logical):
+                with self.assertRaises(Paper2LarkError) as raised:
+                    collect_paper(home, self.binding, self.settings, request, gateway, apply=True)
+
+                self.assertEqual(raised.exception.code, "INDEX_CONFLICT")
+                self.assertEqual(gateway.records["recOne"]["fields"][logical], human_value)
+                self.assertEqual(gateway.write_counts["update"], 0)
+
+    def test_apply_fills_empty_values_when_preconditions_remain_unchanged(self):
+        cases = (
+            ("title", record("recOne", title="", paper_key="doi:10.1000/status",
+                             keywords=["AI Agents"], reading_status=["To Read"]),
+             self.add({"kind": "doi", "value": "10.1000/status"}, title="Generated title"), "Generated title"),
+            ("reading_status", record("recOne", title="Curated title", paper_key="doi:10.1000/fill-status",
+                                      keywords=["AI Agents"], reading_status=[]),
+             self.add({"kind": "doi", "value": "10.1000/fill-status"}, title="Curated title"), ["To Read"]),
+            ("keywords", record("recOne", title="Curated title", paper_key="doi:10.1000/fill-keywords",
+                                keywords=[], reading_status=["To Read"]),
+             self.add({"kind": "doi", "value": "10.1000/fill-keywords"}, title="Curated title",
+                      keyword_proposal=proposal(selected=("AI Agents",))), ["AI Agents"]),
+        )
+        for logical, existing, request, expected_value in cases:
+            home = self.root / ("fill-" + logical)
+            state.initialize(home)
+            gateway = MemoryGateway(self.binding, [existing])
+            result = collect_paper(home, self.binding, self.settings, request, gateway, apply=True)
+
+            with self.subTest(logical=logical):
+                self.assertEqual(result["action"], "fill")
+                self.assertEqual(gateway.records["recOne"]["fields"][logical], expected_value)
+                self.assertEqual(gateway.write_counts["update"], 1)
 
     def test_existing_record_is_read_before_unused_keyword_option_write(self):
         self.init_state()
