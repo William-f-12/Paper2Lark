@@ -1,0 +1,11 @@
+.paper2lark-work/
+.env
+.env.*
+!.env.example
+lark-*-authorization.png
+__pycache__/
+dist/
+build/
+*.egg-info/
+.venv/
+.pytest_cache/

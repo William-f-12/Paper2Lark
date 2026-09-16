@@ -1,0 +1,377 @@
+import copy
+import json
+import tempfile
+import unittest
+from pathlib import Path
+import sys
+from unittest.mock import patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
+
+from tests import test_commands as commands
+from paper2lark import state
+from paper2lark.bindings import digest
+from paper2lark.errors import Paper2LarkError
+from paper2lark.publishing import (apply_publication, cancel_run, plan_publication,
+                                   resume_publication)
+from paper2lark.runs import (create_run, load_run, transition_run, write_artifact,
+                             write_text_artifact)
+from paper2lark.templates import snapshot_template
+
+
+class TemplateRunner:
+    def __init__(self, template):
+        self.template = copy.deepcopy(template)
+
+    def auth(self, verify=False):
+        return {'code': 'OK', 'account': copy.deepcopy(commands.ACCOUNT),
+                'verified': bool(verify)}
+
+    def call(self, args, cwd=None):
+        if args[:2] == ['docs', '+fetch']:
+            return {'document': copy.deepcopy(self.template)}
+        raise AssertionError(args)
+
+
+class Gateway:
+    def __init__(self, record):
+        self.record = copy.deepcopy(record)
+        self.fields = copy.deepcopy(commands.FIELDS)
+        self.update_calls = 0
+        self.replace_calls = 0
+        self.uncertain_update = False
+        self.uncertain_before_update = False
+        self.human_edit_before_update = None
+
+    def snapshot(self):
+        return {'fields': copy.deepcopy(self.fields),
+                'mapping': {}, 'records': [copy.deepcopy(self.record)]}
+
+    def get_record(self, record_id):
+        if record_id != self.record['record_id']:
+            raise AssertionError(record_id)
+        return copy.deepcopy(self.record)
+
+    def replace_keyword_field(self, expected, definition):
+        self.replace_calls += 1
+        index = next(i for i, field in enumerate(self.fields) if field['id'] == expected['id'])
+        self.fields[index] = {'id': expected['id'], **copy.deepcopy(definition)}
+        return copy.deepcopy(self.fields[index])
+
+    def update_record(self, record_id, changes, expected_fields=None):
+        self.update_calls += 1
+        if self.human_edit_before_update:
+            self.record['fields'].update(copy.deepcopy(self.human_edit_before_update))
+            self.human_edit_before_update = None
+        if expected_fields is not None:
+            for key, value in expected_fields.items():
+                if self.record['fields'].get(key) != value:
+                    raise Paper2LarkError('INDEX_CONFLICT', 'synthetic last-moment edit')
+        if self.uncertain_before_update:
+            self.uncertain_before_update = False
+            raise Paper2LarkError('REMOTE_RESULT_UNCERTAIN', 'synthetic pre-commit loss')
+        self.record['fields'].update(copy.deepcopy(changes))
+        if self.uncertain_update:
+            self.uncertain_update = False
+            raise Paper2LarkError('REMOTE_RESULT_UNCERTAIN', 'synthetic lost response')
+        return copy.deepcopy(self.record)
+
+
+class Documents:
+    def __init__(self):
+        self.children = []
+        self.documents = {}
+        self.create_calls = 0
+        self.uncertain_create = False
+
+    def list_children(self):
+        return copy.deepcopy(self.children)
+
+    def create_markdown_raw(self, run_dir, publication_path, title):
+        self.create_calls += 1
+        document_id = 'doc-created'
+        content = Path(publication_path).read_text(encoding='utf-8')
+        node = {'space_id': 'space-command-test', 'node_token': 'node-created',
+                'obj_token': document_id, 'obj_type': 'docx',
+                'parent_node_token': 'wiki-command-test', 'title': title}
+        self.children = [node]
+        self.documents[document_id] = {'document_id': document_id, 'revision_id': 4,
+                                       'content': content, 'node_token': 'node-created'}
+        if self.uncertain_create:
+            self.uncertain_create = False
+            raise Paper2LarkError('REMOTE_RESULT_UNCERTAIN', 'synthetic lost response')
+        return {'document_id': document_id, 'revision_id': 3,
+                'url': 'https://example.test/docx/doc-created'}
+
+    def verify_document(self, document_id, markers, expected_content_sha256):
+        item = self.documents[document_id]
+        if any(marker not in item['content'] for marker in markers):
+            raise Paper2LarkError('DOCUMENT_VERIFICATION_FAILED', 'marker absent')
+        import hashlib
+        if hashlib.sha256(item['content'].encode('utf-8')).hexdigest() != expected_content_sha256:
+            raise Paper2LarkError('DOCUMENT_VERIFICATION_FAILED', 'content digest mismatch')
+        return {'document_id': document_id, 'revision_id': item['revision_id'],
+                'node_token': item['node_token'], 'content': item['content']}
+
+    def recover_created_document(self, before_children, markers, expected_content_sha256):
+        before = set(before_children)
+        matches = []
+        for node in self.children:
+            if node['node_token'] in before:
+                continue
+            try:
+                matches.append(self.verify_document(
+                    node['obj_token'], markers, expected_content_sha256))
+            except Paper2LarkError:
+                pass
+        if len(matches) != 1:
+            raise Paper2LarkError('REMOTE_COMMIT_UNCERTAIN', 'no unique candidate')
+        return matches[0]
+
+
+def logical_record(record_id='recPublish'):
+    return {'record_id': record_id, 'fields': {
+        'title': 'Synthetic Publication Paper', 'authors': 'Ada Author, B. Writer',
+        'year': 2026, 'venue': 'Test Venue',
+        'source_url': 'https://example.test/paper', 'paper_key': 'doi:10.1000/m4',
+        'keywords': ['Machine Learning'], 'reading_status': ['To Read'],
+        'priority': ['High'], 'note_url': None, 'summary': None,
+        'annotation': None, 'created_at': '2026-09-15T00:00:00Z',
+    }, 'raw_fields': {}}
+
+
+class PublicationTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.home = Path(self.temp.name).resolve() / 'home'
+        self.binding = commands.plugin_binding()
+        self.binding['original_urls']['wiki_url'] = 'https://example.test/wiki/wiki-command-test'
+        self.settings = {
+            'keywords': {'max_words': 3, 'max_per_paper': 8},
+            'workflow': {'mark_read_after_publish': True,
+                         'existing_note': 'preserve_manual',
+                         'archive_strategy': 'fixed_parent'},
+        }
+        self.template_doc = {'document_id': self.binding['template']['document_id'],
+                             'revision_id': 9,
+                             'content': '# Template\n\n## Summary\nWrite evidence.'}
+        self.runner = TemplateRunner(self.template_doc)
+        self.gateway = Gateway(logical_record())
+        self.documents = Documents()
+
+    def drafted_run(self, persist=True, requested='full', main='complete'):
+        state.initialize(self.home)
+        tracked = state.sync_paper(
+            self.home, self.binding['library_id'], digest(self.binding),
+            self.binding['base_token'], self.binding['table_id'],
+            {'aliases': ['doi:10.1000/m4'], 'canonical_key': 'doi:10.1000/m4',
+             'source_version': 'published'}, self.gateway.record['record_id'])
+        template = snapshot_template(self.template_doc)
+        request = {'schema_version': 1, 'persist_to_library': persist,
+                   'requested_depth': requested, 'reader_preference': 'builtin',
+                   'force_reread': False, 'record_id': self.gateway.record['record_id']}
+        run = create_run(self.home, request, template, {'schema_version': 1},
+                         paper_uid=tracked['paper_uid'])
+        run_dir = Path(run['run_dir'])
+        source = write_artifact(run_dir, 'source.json', {'schema_version': 1})
+        run = transition_run(self.home, run['run_id'], 'awaiting_source',
+                             'awaiting_agent', {'source': source})
+        role = write_artifact(run_dir, 'role-map.json', {'schema_version': 1})
+        analysis_value = {
+            'schema_version': 1, 'run_id': run['run_id'], 'paper_uid': run['paper_uid'],
+            'requested_depth': requested, 'takeaway': 'A concise verified takeaway.',
+            'actual_coverage': {
+                'metadata': {'status': 'complete', 'reason': 'fixture'},
+                'abstract': {'status': 'complete', 'reason': 'fixture'},
+                'main_text': {'status': main, 'reason': 'fixture'},
+                'figures_tables': {'status': 'unavailable', 'reason': 'fixture'},
+                'appendix_supplement': {'status': 'unavailable', 'reason': 'fixture'},
+            },
+            'keyword_proposal': {'selected_existing': ['Machine Learning'],
+                                 'proposed_new': []},
+        }
+        analysis = write_artifact(run_dir, 'analysis.json', analysis_value)
+        note = write_artifact(run_dir, 'note-plan.json', {'schema_version': 1})
+        submission = {
+            'schema_version': 1, 'run_id': run['run_id'],
+            'generated_at': '2026-09-15T12:00:00.000000Z',
+            'source_sha256': source['sha256'], 'template_digest': template['content_digest'],
+            'role_map_sha256': role['sha256'], 'analysis_sha256': analysis['sha256'],
+            'note_plan_sha256': note['sha256'],
+        }
+        run = transition_run(self.home, run['run_id'], 'awaiting_agent', 'submitting',
+                             {'role_map': role, 'analysis': analysis, 'note_plan': note},
+                             submission=submission)
+        draft = write_text_artifact(run_dir, 'draft.md', '# Summary\n\nA concise verified takeaway.\n')
+        verification = write_artifact(run_dir, 'verification.json', {
+            'schema_version': 1, 'run_id': run['run_id'], 'coverage': analysis_value['actual_coverage'],
+            'keywords': ['Machine Learning'], 'warnings': [], 'result': 'drafted'})
+        transition_run(self.home, run['run_id'], 'submitting', 'drafted',
+                       {'draft': draft, 'verification': verification})
+        return run['run_id']
+
+    def plan(self, run_id):
+        return plan_publication(self.home, self.binding, self.settings, run_id,
+                                self.runner, self.gateway, documents=self.documents)
+
+    def apply(self, run_id, plan):
+        return apply_publication(self.home, self.binding, self.settings, run_id, plan,
+                                 self.runner, self.gateway, documents=self.documents)
+
+    def test_plan_rejects_draft_only_stale_template_and_incomplete_full_read(self):
+        with self.assertRaises(Paper2LarkError) as raised:
+            self.plan(self.drafted_run(persist=False))
+        self.assertEqual(raised.exception.code, 'PUBLICATION_NOT_AUTHORIZED')
+
+        run_id = self.drafted_run()
+        self.runner.template['content'] += '\nchanged'
+        with self.assertRaises(Paper2LarkError) as raised:
+            self.plan(run_id)
+        self.assertEqual(raised.exception.code, 'TEMPLATE_CHANGED')
+
+        self.runner.template = copy.deepcopy(self.template_doc)
+        run_id = self.drafted_run(main='unavailable')
+        with self.assertRaises(Paper2LarkError) as raised:
+            self.plan(run_id)
+        self.assertEqual(raised.exception.code, 'PUBLICATION_COVERAGE_INCOMPLETE')
+
+    def test_plan_and_apply_create_verify_then_update_index(self):
+        run_id = self.drafted_run()
+        planned = self.plan(run_id)
+        plan = json.loads(Path(planned['plan_path']).read_text(encoding='utf-8'))
+        self.assertEqual(planned['status'], 'planned')
+        self.assertEqual(plan['mutations'], ['create_note', 'update_index'])
+        result = self.apply(run_id, plan)
+        self.assertEqual(result['status'], 'completed')
+        self.assertEqual(self.documents.create_calls, 1)
+        self.assertEqual(self.gateway.update_calls, 1)
+        self.assertEqual(self.gateway.record['fields']['summary'],
+                         'A concise verified takeaway.')
+        self.assertEqual(self.gateway.record['fields']['reading_status'], ['Read'])
+        self.assertIn('node-created', self.gateway.record['fields']['note_url'])
+        repeated = self.apply(run_id, plan)
+        self.assertEqual(repeated['status'], 'completed')
+        self.assertEqual(self.documents.create_calls, 1)
+        self.assertEqual(self.gateway.update_calls, 1)
+
+    def test_lost_create_response_recovers_without_second_create(self):
+        run_id = self.drafted_run()
+        plan = json.loads(Path(self.plan(run_id)['plan_path']).read_text(encoding='utf-8'))
+        self.documents.uncertain_create = True
+        with self.assertRaises(Paper2LarkError) as raised:
+            self.apply(run_id, plan)
+        self.assertEqual(raised.exception.code, 'REMOTE_RESULT_UNCERTAIN')
+        self.assertEqual(resume_publication(self.home, run_id)['status'],
+                         'uncertain_remote_commit')
+        result = self.apply(run_id, plan)
+        self.assertEqual(result['status'], 'completed')
+        self.assertEqual(self.documents.create_calls, 1)
+
+    def test_lost_index_response_is_verified_on_resume(self):
+        run_id = self.drafted_run()
+        plan = json.loads(Path(self.plan(run_id)['plan_path']).read_text(encoding='utf-8'))
+        self.gateway.uncertain_update = True
+        with self.assertRaises(Paper2LarkError) as raised:
+            self.apply(run_id, plan)
+        self.assertEqual(raised.exception.code, 'REMOTE_RESULT_UNCERTAIN')
+        result = self.apply(run_id, plan)
+        self.assertEqual(result['status'], 'completed')
+        self.assertEqual(self.documents.create_calls, 1)
+        self.assertEqual(self.gateway.update_calls, 1)
+
+    def test_unapplied_uncertain_index_write_retries_only_with_intact_preconditions(self):
+        run_id = self.drafted_run()
+        plan = json.loads(Path(self.plan(run_id)['plan_path']).read_text(encoding='utf-8'))
+        self.gateway.uncertain_before_update = True
+        with self.assertRaises(Paper2LarkError) as raised:
+            self.apply(run_id, plan)
+        self.assertEqual(raised.exception.code, 'REMOTE_RESULT_UNCERTAIN')
+        result = self.apply(run_id, plan)
+        self.assertEqual(result['status'], 'completed')
+        self.assertEqual(self.documents.create_calls, 1)
+        self.assertEqual(self.gateway.update_calls, 2)
+
+    def test_template_change_after_plan_blocks_before_document_creation(self):
+        run_id = self.drafted_run()
+        plan = json.loads(Path(self.plan(run_id)['plan_path']).read_text(encoding='utf-8'))
+        self.runner.template['content'] += '\nchanged after plan'
+        with self.assertRaises(Paper2LarkError) as raised:
+            self.apply(run_id, plan)
+        self.assertEqual(raised.exception.code, 'TEMPLATE_CHANGED')
+        self.assertEqual(self.documents.create_calls, 0)
+
+    def test_plan_retry_adopts_artifacts_left_before_manifest_transition(self):
+        run_id = self.drafted_run()
+        with patch('paper2lark.publishing.transition_run',
+                   side_effect=Paper2LarkError('SYNTHETIC_CRASH', 'after plan write')):
+            with self.assertRaises(Paper2LarkError):
+                self.plan(run_id)
+        _, stranded = load_run(self.home, run_id)
+        self.assertEqual(stranded['status'], 'drafted')
+        planned = self.plan(run_id)
+        self.assertEqual(planned['status'], 'planned')
+
+    def test_last_moment_managed_edit_is_not_overwritten(self):
+        run_id = self.drafted_run()
+        plan = json.loads(Path(self.plan(run_id)['plan_path']).read_text(encoding='utf-8'))
+        self.gateway.human_edit_before_update = {'summary': 'Human edit at write boundary.'}
+        with self.assertRaises(Paper2LarkError) as raised:
+            self.apply(run_id, plan)
+        self.assertEqual(raised.exception.code, 'INDEX_CONFLICT')
+        self.assertEqual(self.gateway.record['fields']['summary'],
+                         'Human edit at write boundary.')
+
+    def test_completed_replay_reports_no_new_remote_mutations(self):
+        run_id = self.drafted_run()
+        plan = json.loads(Path(self.plan(run_id)['plan_path']).read_text(encoding='utf-8'))
+        self.assertTrue(self.apply(run_id, plan)['remote_mutations'])
+        self.assertFalse(self.apply(run_id, plan)['remote_mutations'])
+
+    def test_explicit_cancel_releases_a_blocked_run_and_retains_artifacts(self):
+        run_id = self.drafted_run()
+        _, run = load_run(self.home, run_id)
+        state.reserve_run(
+            self.home, self.binding['library_id'], run['paper_uid'], run_id)
+        plan = json.loads(Path(self.plan(run_id)['plan_path']).read_text(encoding='utf-8'))
+        self.gateway.record['fields']['summary'] = 'Human conflict.'
+        with self.assertRaises(Paper2LarkError):
+            self.apply(run_id, plan)
+        result = cancel_run(self.home, self.binding, run_id)
+        self.assertEqual(result['status'], 'canceled')
+        self.assertTrue(result['reservation_released'])
+        self.assertTrue(result['remote_state_may_exist'])
+        run_dir, canceled = load_run(self.home, run_id)
+        self.assertEqual(canceled['status'], 'canceled')
+        self.assertTrue((run_dir / 'publication.md').is_file())
+        self.assertIsNone(state.get_active_run(
+            self.home, self.binding['library_id'], run['paper_uid']))
+        create_calls = self.documents.create_calls
+        with self.assertRaises(Paper2LarkError) as raised:
+            self.apply(run_id, plan)
+        self.assertEqual(raised.exception.code, 'RUN_STATE_CONFLICT')
+        self.assertEqual(self.documents.create_calls, create_calls)
+
+    def test_managed_index_conflict_blocks_but_user_status_and_keywords_are_preserved(self):
+        run_id = self.drafted_run()
+        plan = json.loads(Path(self.plan(run_id)['plan_path']).read_text(encoding='utf-8'))
+        self.gateway.record['fields']['reading_status'] = ['Paused']
+        self.gateway.record['fields']['keywords'] = ['AI Agents']
+        result = self.apply(run_id, plan)
+        self.assertEqual(result['status'], 'completed')
+        self.assertEqual(self.gateway.record['fields']['reading_status'], ['Paused'])
+        self.assertEqual(self.gateway.record['fields']['keywords'], ['AI Agents'])
+        self.assertIn('STATUS_CHANGED', result['warnings'])
+        self.assertIn('KEYWORDS_CHANGED', result['warnings'])
+
+        run_id = self.drafted_run()
+        plan = json.loads(Path(self.plan(run_id)['plan_path']).read_text(encoding='utf-8'))
+        self.gateway.record['fields']['summary'] = 'Human edit after planning.'
+        with self.assertRaises(Paper2LarkError) as raised:
+            self.apply(run_id, plan)
+        self.assertEqual(raised.exception.code, 'INDEX_CONFLICT')
+        self.assertEqual(resume_publication(self.home, run_id)['status'], 'blocked_conflict')
+
+
+if __name__ == '__main__':
+    unittest.main()
