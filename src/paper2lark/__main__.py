@@ -18,6 +18,8 @@ from .papers import collect_paper, query_papers, update_paper, validate_query_re
 from .publishing import (apply_publication, cancel_run, plan_publication,
                          resume_publication)
 from .reading import (prepare_read, show_run, submit_read, validate_read_request)
+from .provisioning import Provisioner
+from .setup import plan_setup, apply_setup, show_setup, cancel_setup
 from .sources import ingest_source, validate_source_input
 
 
@@ -87,6 +89,16 @@ def parser():
     publish_apply = publish_actions.add_parser('apply', help='Apply one immutable publication plan')
     publish_apply.add_argument('--run', required=True)
     publish_apply.add_argument('--plan', required=True)
+    setup = commands.add_parser('setup', help='Plan, provision, or extend a paper library')
+    setup_actions = setup.add_subparsers(dest='action', required=True)
+    setup_plan = setup_actions.add_parser('plan', help='Save an immutable setup plan without remote writes')
+    setup_plan.add_argument('--input', required=True)
+    setup_apply = setup_actions.add_parser('apply', help='Apply the exact saved setup plan')
+    setup_apply.add_argument('--plan', required=True)
+    setup_apply.add_argument('--adopt', help='Verify and adopt one uncertain resource reference')
+    for action in ('show', 'cancel'):
+        local = setup_actions.add_parser(action, help='Inspect or cancel local setup while retaining resources')
+        local.add_argument('--id', required=True)
     return root
 
 
@@ -148,6 +160,19 @@ def execute(args):
         return {**loaded, 'home': str(home)}, 0
     if args.command == 'state':
         return state.initialize(home), 0
+    if args.command == 'setup':
+        if args.action == 'show':
+            return show_setup(loaded, args.id), 0
+        if args.action == 'cancel':
+            return cancel_setup(loaded, args.id), 0
+        _, request = read_json_object(args.input if args.action == 'plan' else args.plan,
+                                      4 * 1024 * 1024)
+        adopt = read_json_object(args.adopt)[1] if args.action == 'apply' and args.adopt else None
+        runner = LarkRunner(loaded['settings']['lark'].get('cli'))
+        provider = Provisioner(runner)
+        if args.action == 'plan':
+            return plan_setup(loaded, request, provider), 0
+        return apply_setup(loaded, request, provider, runner, adopt=adopt), 0
     if args.command == 'doctor':
         report = diagnose(loaded, offline=args.offline, verify=args.verify)
         return report, 0 if report['healthy'] else 1

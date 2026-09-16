@@ -1,10 +1,10 @@
 # Paper2Lark
 
-Latest verification: [functional audit and fixes, 2026-09-15](docs/audit-2026-09-15.md).
+Latest verification: [M5 provisioning and customization, 2026-09-16](docs/compatibility-m5.md).
 
-Paper2Lark is a lightweight local Claude Code and Codex plugin for managing and reading papers with an existing Lark library.
+Paper2Lark is a lightweight local Claude Code and Codex plugin for managing and reading papers with a Lark library.
 
-**Current milestone: M4 — publication and recovery (0.5.0).** It can collect/query/update an existing index, create evidence-linked local drafts, publish verified Wiki notes, reconcile their Base records, and resume partial or uncertain writes. M4 does not provision a new library; setup and customization remain M5.
+**Current milestone: M5 — provisioning and customization (0.6.0).** Create a new English/Chinese Wiki library, bind an existing one, or plan additive field migration and explicit remapping. Collection, evidence-linked drafts, verified publication and recovery remain available. M6 release certification is still pending.
 
 ## Build and test
 
@@ -25,7 +25,7 @@ For a Claude session:
 claude --plugin-dir ./dist/claude/plugins/paper2lark
 ```
 
-Invoke `/paper2lark:probe` for a local runtime check, `/paper2lark:doctor` for diagnosis, `/paper2lark:add` to collect without reading, `/paper2lark:library` to query/update the index, or `/paper2lark:read` to create and optionally publish a reading note.
+Invoke `/paper2lark:setup` to create or extend a library, `/paper2lark:probe` for a local runtime check, `/paper2lark:doctor` for diagnosis, `/paper2lark:add` to collect without reading, `/paper2lark:library` to query/update the index, or `/paper2lark:read` to create and optionally publish a reading note.
 
 For Codex:
 
@@ -34,7 +34,7 @@ codex plugin marketplace add ./dist/codex
 codex plugin add paper2lark@paper2lark-local
 ```
 
-Start a new session and ask it to use `paper2lark-probe`, `paper2lark-doctor`, `paper2lark-add`, `paper2lark-library` or `paper2lark-read`. These commands register a local marketplace and change the selected host's plugin configuration. A previously installed development version may need reinstalling when the package version changes. Desktop UI installation is not separately certified.
+Start a new session and ask it to use `paper2lark-setup`, `paper2lark-probe`, `paper2lark-doctor`, `paper2lark-add`, `paper2lark-library` or `paper2lark-read`. These commands register a local marketplace and change the selected host's plugin configuration. A previously installed development version may need reinstalling when the package version changes. Desktop UI installation is not separately certified.
 
 ## Private configuration
 
@@ -85,6 +85,56 @@ Binding verifies the current account, resolved resources, readable template and 
 ```
 
 Pass that file with `--field-map-file`; use `--status-map-file` for mappings such as `{"unread":"To Read","read":"Read"}`. `--replace` explicitly authorizes replacing an existing local target/account binding. Normal refresh retains existing field-ID mappings; schema drift stops before replacing the stored binding.
+
+## Create or customize a library
+
+Use the setup skill or the commands below. Configure Lark CLI separately; setup reuses its user identity and never starts OAuth. Keep an existing personal profile for its current library; a fresh library requires an unbound profile (or a separate private home). Setup does not change language settings or initialize/reset SQLite implicitly. For a new private home, `config init` and `state init` remain explicit local setup steps.
+
+Create a private UTF-8 JSON request, replacing the origin/name with your own:
+
+```json
+{"schema_version":1,"mode":"create","site_url":"https://YOUR-HOST.larksuite.com","name":"Paper Library"}
+```
+
+```powershell
+python ./dist/codex/plugins/paper2lark/scripts/paper2lark.py --library-language zh-CN setup plan --input ./setup-request.json
+python ./dist/codex/plugins/paper2lark/scripts/paper2lark.py setup apply --plan "ABSOLUTE-SAVED-PLAN-PATH"
+```
+
+Use the returned `plan_path`, after inspecting its account, profile, resource names and schema. Put the same `--home`/`--profile` before each command when using a nondefault configuration. Planning performs only remote reads and stores immutable local artifacts under `<home>/setup/<setup-id>`. Apply creates a new Wiki space, root, index Base node, an explicit 12-field table, a notes container and a research/review template. The Title field is primary. The keyword column starts with the shipped 45 English labels; subsequent paper operations use live options. Setup retains any service-created extra tables/fields.
+
+`language.library` supports `en` and `zh-CN` for new labels/templates. `language.content` independently controls later notes; choosing Chinese setup assets does not silently change this saved setting. Human-only template sections remain protected by the reading workflow. You may reorganize Wiki nodes and edit the template yourself; use `bind` with explicit targets to change the notes parent/template, and provide `--replace` when changing resource identities.
+
+For an existing bound index, plan an additive migration:
+
+```json
+{"schema_version":1,"mode":"migrate","field_map":{"title":"fldEXISTING"},"status_map":{"unread":"To Read","read":"Read"}}
+```
+
+The maps are optional; replace example IDs/labels with observed values. Existing field IDs survive display-name changes. Missing logical fields are added; incompatible types require explicit compatible remapping. Existing rows, extra columns, options, views and template contents are not rewritten. A stale schema or changed account/binding stops apply before the affected write. Completed setup is idempotent.
+
+Inspect or recover a partial setup:
+
+```powershell
+python ./dist/codex/plugins/paper2lark/scripts/paper2lark.py setup show --id SETUP-UUID
+python ./dist/codex/plugins/paper2lark/scripts/paper2lark.py setup apply --plan "ABSOLUTE-SAVED-PLAN-PATH"
+```
+
+Known resource IDs are verified and reused. Each write has a durable intent entry. If a response was lost before its ID was recorded, the operation remains uncertain and is never recreated automatically. Inspect the remote resources and supply an exact reference using `--adopt ./adoption.json`; the adapter verifies its properties and destination before accepting it:
+
+```json
+{"step":"root","reference":{"node_token":"VERIFIEDNODE","obj_token":"VERIFIEDDOC","space_id":"VERIFIEDSPACE"}}
+```
+
+| Pending step | Required reference properties |
+| --- | --- |
+| `space` | `space_id` (description must contain this setup UUID) |
+| `root`, `index`, `notes` | `node_token`, `obj_token`, `space_id` |
+| `table` | `table_id` |
+| `template` | `document_id` (content must match the planned template) |
+| `field:LOGICAL_KEY` | `field_id` |
+
+If no resource can be verified, stop and retain the journal; do not guess IDs. An uncertain intent can also mean the process stopped before the request reached Lark. An explicit `setup cancel --id SETUP-UUID` abandons local progress and permits another plan, while retaining all artifacts and remote resources for inspection. There is no destructive rollback. Recovery requires the plan's runtime version. Profile and physical-library locks coordinate operations on the same machine; no cross-machine exactly-once guarantee is made.
 
 ## Manage the paper index
 
@@ -246,7 +296,7 @@ Doctor never initializes state, rewrites bindings, creates notes, changes fields
 
 ## Implementation and limits
 
-- `src/paper2lark`: configuration, SQLite identity/publication state, typed Lark adapters, paper-index services, source ingestion, reading runs, publication and recovery.
+- `src/paper2lark`: configuration, SQLite identity/publication state, typed Lark adapters, paper-index services, reading/publication, and journaled setup.
 - `skill_sources`: shared English skill instructions; generated per-host entrypoints.
 - `scripts`: portable launcher and explicit-allowlist builder.
 - `tests`: real filesystem/subprocess tests plus provider fault injection.
@@ -254,9 +304,9 @@ Doctor never initializes state, rewrites bindings, creates notes, changes fields
 
 New local files/directories use restrictive POSIX modes where supported. Windows uses inherited ACLs; choose a private home directory. Private resource IDs, bindings, note data and raw integration evidence do not belong in the public repository. Local hashes detect accidental runtime changes; they are not cryptographic publisher signatures.
 
-M2 index writes, M3 reading, and M4 publication/recovery use a real subprocess boundary with a synthetic provider. Existing-library live acceptance remains read-only; production Wiki/Base writes were not executed for M4. M4 does not ingest figure/table assets, provision a library, certify scanned-PDF OCR, support global multi-machine exactly-once delivery, or perform concurrent in-place document editing.
+M2 index writes, M3 reading, and M4 publication/recovery use a real subprocess boundary with a synthetic provider. Existing-library live acceptance remains read-only; production Wiki/Base writes were not executed for M4. M5 provisioning has synthetic end-to-end and fault-injection coverage; fresh production Wiki creation has not been exercised. The runtime does not ingest figure/table assets, certify scanned-PDF OCR, support global multi-machine exactly-once delivery, or perform concurrent in-place document editing.
 
-See the [design](docs/superpowers/specs/2026-09-13-paper2lark-design.md), [M0 findings](docs/compatibility-m0.md), [M1 validation report](docs/compatibility-m1.md), [M2 validation report](docs/compatibility-m2.md), [M3 validation report](docs/compatibility-m3.md), and [M4 validation report](docs/compatibility-m4.md). The M0 revision finding is why M4 publishes a separate note revision.
+See the [design](docs/superpowers/specs/2026-09-13-paper2lark-design.md), [M0 findings](docs/compatibility-m0.md), [M1 validation report](docs/compatibility-m1.md), [M2 validation report](docs/compatibility-m2.md), [M3 validation report](docs/compatibility-m3.md), [M4 validation report](docs/compatibility-m4.md), and [M5 validation report](docs/compatibility-m5.md). The M0 revision finding is why M4 publishes a separate note revision.
 
 ## License
 

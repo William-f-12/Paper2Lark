@@ -44,7 +44,8 @@ def build():
                      'state.py', 'lark.py', 'bindings.py', 'doctor.py', 'contracts.py',
                      'locking.py', 'identity.py', 'keywords.py', 'base.py', 'papers.py',
                      'runs.py', 'sources.py', 'templates.py', 'reading.py',
-                     'documents.py', 'publishing.py'):
+                     'documents.py', 'publishing.py', 'setup.py', 'setup_assets.py',
+                     'provisioning.py', 'keywords.en.json'):
             files['paper2lark/' + name] = (ROOT / 'src/paper2lark' / name).read_bytes()
         for name, contents in sorted(files.items()):
             entry = zipfile.ZipInfo(name, date_time=(2026, 1, 1, 0, 0, 0))
@@ -64,16 +65,17 @@ def build():
         package = marketplace / 'plugins/paper2lark'
         packages[host] = package
         manifest = {'name': 'paper2lark', 'version': version,
-                    'description': 'Collect, query, update, read, draft, and publish papers with an existing Lark library.',
+                    'description': 'Collect, query, update, read, draft, and publish papers and set up or extend a Lark library.',
                     'author': {'name': 'Paper2Lark contributors'}}
         if host == 'codex':
             manifest['skills'] = './skills/'
             manifest['interface'] = {'displayName': 'Paper2Lark', 'shortDescription': 'Paper reading and Lark publishing',
-                                     'longDescription': 'Collect and query papers, create evidence-linked drafts, and publish verified notes with recovery.',
-                                     'defaultPrompt': ['Manage or read papers in my existing Paper2Lark library.'], 'capabilities': ['Read', 'Write'],
+                                     'longDescription': 'Set up or extend paper libraries, collect and query papers, create evidence-linked drafts, and publish verified notes with recovery.',
+                                     'defaultPrompt': ['Set up a Paper2Lark library, or manage and read papers in an existing library.'], 'capabilities': ['Read', 'Write'],
                                      'developerName': 'Paper2Lark contributors', 'category': 'Productivity'}
         outputs[package / f'.{host}-plugin/plugin.json'] = json_bytes(manifest)
         for skill_key, description in (
+            ('setup', 'Create a paper library or add compatible missing fields using reviewable, recoverable setup plans.'),
             ('probe', 'Verify the local Paper2Lark plugin runtime installation.'),
             ('doctor', 'Diagnose Paper2Lark configuration, local state, Lark credentials and existing library bindings without repairs or authorization resets.'),
             ('add', 'Use when the user asks to collect or index a paper in an existing Paper2Lark library without reading or summarizing it.'),

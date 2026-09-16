@@ -9,11 +9,12 @@ ROOT = Path(__file__).resolve().parents[1]
 class M4DocumentationTests(unittest.TestCase):
     def test_readme_documents_complete_m4_workflow_and_limits(self):
         text = (ROOT / 'README.md').read_text(encoding='utf-8').casefold()
-        for marker in ('m4', '0.5.0', 'schema-v3', 'publish plan', 'publish apply',
+        for marker in ('m4', 'schema-v3', 'publish plan', 'publish apply',
                        'runs resume', 'runs cancel', 'uncertain_remote_commit', 'blocked_conflict',
                        'separate note revision', 'm5'):
             self.assertIn(marker, text)
-        self.assertIn('does not provision', text)
+        self.assertIn('setup plan', text)
+        self.assertIn('setup apply', text)
 
     def test_compatibility_report_records_evidence_and_scope(self):
         text = (ROOT / 'docs/compatibility-m4.md').read_text(encoding='utf-8').casefold()

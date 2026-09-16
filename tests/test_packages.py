@@ -25,7 +25,7 @@ class PackageTests(unittest.TestCase):
             capture_output=True, text=True, encoding='utf-8')
 
     def test_both_packages_run_from_unrelated_unicode_directory(self):
-        with tempfile.TemporaryDirectory(prefix='论文 library ') as folder:
+        with tempfile.TemporaryDirectory(prefix='璁烘枃 library ') as folder:
             base = Path(folder)
             results = []
             for host in ('claude', 'codex'):
@@ -87,6 +87,8 @@ class PackageTests(unittest.TestCase):
             'paper2lark/papers.py', 'paper2lark/runs.py', 'paper2lark/sources.py',
             'paper2lark/templates.py', 'paper2lark/reading.py',
             'paper2lark/documents.py', 'paper2lark/publishing.py',
+            'paper2lark/setup.py', 'paper2lark/setup_assets.py',
+            'paper2lark/provisioning.py', 'paper2lark/keywords.en.json',
         }
         with zipfile.ZipFile(archive) as runtime:
             self.assertEqual(set(runtime.namelist()), expected)
@@ -109,7 +111,7 @@ class PackageTests(unittest.TestCase):
                for host, package in packages.items()}
         self.assertEqual(raw['claude'], raw['codex'])
         info = json.loads(raw['codex'])
-        self.assertEqual(info['version'], '0.5.0')
+        self.assertEqual(info['version'], '0.6.0')
         self.assertEqual(info['runtime_format'], 'stdlib-zipapp')
         self.assertEqual(info['third_party_dependencies'], [])
         runtime = (packages['codex'] / 'runtime.pyz').read_bytes()
@@ -120,19 +122,19 @@ class PackageTests(unittest.TestCase):
         self.assertEqual(info['plugin_size_bytes'], actual_sizes)
         self.assertTrue(all(size <= 262144 for size in actual_sizes.values()))
 
-    def test_manifests_cover_m4_publication_without_private_identifiers(self):
+    def test_manifests_cover_setup_and_publication_without_private_identifiers(self):
         forbidden = (b'app-command-test', b'user-command-test', b'base-command-test',
                      b'space-command-test', b'recvuWhOsIukaD', b'.paper2lark-work')
         for host in ('claude', 'codex'):
             package = ROOT / 'dist' / host / 'plugins/paper2lark'
             manifest = json.loads((package / f'.{host}-plugin/plugin.json').read_text(encoding='utf-8'))
             description = manifest['description'].lower()
-            for word in ('collect', 'query', 'update', 'read', 'draft', 'publish'):
+            for word in ('collect', 'query', 'update', 'read', 'draft', 'publish', 'set up', 'extend'):
                 self.assertIn(word, description)
             skill_names = {path.parent.name for path in (package / 'skills').glob('*/SKILL.md')}
-            expected = ({'probe', 'doctor', 'add', 'library', 'read'} if host == 'claude' else
+            expected = ({'probe', 'doctor', 'add', 'library', 'read', 'setup'} if host == 'claude' else
                         {'paper2lark-probe', 'paper2lark-doctor', 'paper2lark-add',
-                         'paper2lark-library', 'paper2lark-read'})
+                         'paper2lark-library', 'paper2lark-read', 'paper2lark-setup'})
             self.assertEqual(skill_names, expected)
             payload = b'\n'.join(path.read_bytes() for path in package.rglob('*') if path.is_file())
             for marker in forbidden:

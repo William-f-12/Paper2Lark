@@ -19,6 +19,7 @@ def valid_record_id(value):
             and not any(unicodedata.category(character) == 'Cc' for character in value))
 
 READ_OPERATIONS = {
+    ('wiki', '+space-list'): {'--page-size': True, '--page-token': True},
     ('auth', 'status'): {'--json': False, '--verify': False},
     ('wiki', '+node-get'): {'--node-token': True, '--obj-type': True, '--space-id': True},
     ('wiki', '+node-list'): {'--space-id': True, '--parent-node-token': True,
@@ -36,6 +37,10 @@ READ_OPERATIONS = {
 }
 
 WRITE_OPERATIONS = {
+    ('wiki', '+space-create'): {'--name': True, '--description': True},
+    ('wiki', '+node-create'): {'--space-id': True, '--parent-node-token': True, '--title': True, '--obj-type': True},
+    ('base', '+table-create'): {'--base-token': True, '--name': True, '--fields': True},
+    ('base', '+field-create'): {'--base-token': True, '--table-id': True, '--json': True},
     ('base', '+record-batch-create'): {'--base-token': True, '--table-id': True, '--json': True},
     ('base', '+record-batch-update'): {'--base-token': True, '--table-id': True, '--json': True},
     ('base', '+field-update'): {'--base-token': True, '--table-id': True, '--field-id': True,
@@ -50,6 +55,11 @@ REPEATED_FLAGS = {
 }
 
 REQUIRED_FLAGS = {
+    ('wiki', '+space-list'): {'--page-size'},
+    ('wiki', '+space-create'): {'--name'},
+    ('wiki', '+node-create'): {'--space-id', '--title', '--obj-type'},
+    ('base', '+table-create'): {'--base-token', '--name', '--fields'},
+    ('base', '+field-create'): {'--base-token', '--table-id', '--json'},
     ('auth', 'status'): {'--json'},
     ('wiki', '+node-get'): {'--node-token'},
     ('wiki', '+node-list'): {'--space-id', '--parent-node-token', '--page-size'},
@@ -166,6 +176,19 @@ class LarkRunner:
                 index += 1
         if not REQUIRED_FLAGS.get(operation, set()).issubset(seen):
             raise Paper2LarkError('OPERATION_NOT_ALLOWED', 'A required CLI argument is missing.')
+        if operation == ('wiki', '+node-create'):
+            if args[args.index('--obj-type') + 1] not in ('docx', 'bitable'):
+                raise Paper2LarkError('OPERATION_NOT_ALLOWED', 'Provisioning supports only Docx and Base nodes.')
+        if operation in (('base', '+table-create'), ('base', '+field-create')):
+            flag = '--fields' if operation[1] == '+table-create' else '--json'
+            try:
+                schema = _json_loads(args[args.index(flag) + 1])
+            except (ValueError, RecursionError):
+                raise Paper2LarkError('OPERATION_NOT_ALLOWED', 'Provisioning requires a structured schema.') from None
+            definitions = schema if flag == '--fields' else [schema]
+            if (not isinstance(definitions, list) or not definitions
+                    or any(not isinstance(item, dict) or any(not isinstance(item.get(key), str) or not item[key].strip() for key in ('name', 'type')) for item in definitions)):
+                raise Paper2LarkError('OPERATION_NOT_ALLOWED', 'Provisioning requires explicit field definitions.')
         if operation == ('docs', '+create'):
             content = args[args.index('--content') + 1]
             if (not content.startswith('@./') or '/' in content[3:] or '\\' in content[3:]
