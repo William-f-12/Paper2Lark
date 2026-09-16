@@ -26,21 +26,43 @@ def _human(text):
 
 
 def _protect_sections(blocks):
+    """Apply human ownership to headings and their nested descendants.
+
+    Heading levels are intentionally private to parsing.  The exported
+    snapshot schema remains unchanged, while a human-only section owns every
+    following descendant until an equal or earlier level closes it.  An
+    unknown XML level never closes an active section, so ambiguous input is
+    handled conservatively.
+    """
     protected = []
-    group = []
+    active = []
+    current_start = None
+    current_level = None
 
-    def flush():
-        if not group:
-            return
-        human_only = any(_human(text) for _, text in group)
-        protected.extend((kind, text, human_only) for kind, text in group)
-        group.clear()
-
-    for kind, text in blocks:
+    for kind, text, level in blocks:
         if kind == 'heading':
-            flush()
-        group.append((kind, text))
-    flush()
+            if level is not None:
+                active = [candidate for candidate in active
+                          if candidate is None or candidate < level]
+            current_start = len(protected)
+            current_level = level
+            protected.append((kind, text, bool(active)))
+            if _human(text):
+                active.append(level)
+                protected[-1] = (kind, text, True)
+            continue
+
+        protected.append((kind, text, bool(active)))
+        if _human(text):
+            # A body marker applies to the enclosing section, including its
+            # heading and any preceding body blocks.  A marker in a preamble
+            # keeps the legacy behavior for that block only.
+            start = current_start if current_start is not None else len(protected) - 1
+            for index in range(start, len(protected)):
+                old_kind, old_text, _ = protected[index]
+                protected[index] = (old_kind, old_text, True)
+            if current_start is not None and current_level not in active:
+                active.append(current_level)
     return protected
 
 
@@ -50,13 +72,15 @@ def _plain_blocks(content):
         text = line.strip()
         if not text:
             continue
-        heading = re.match(r'^#{1,6}\s+(.+?)\s*$', text)
+        heading = re.match(r'^(#{1,6})\s+(.+?)\s*$', text)
         if heading:
-            text = heading.group(1)
+            text = heading.group(2)
             kind = 'heading'
+            level = len(heading.group(1))
         else:
             kind = 'paragraph'
-        blocks.append((kind, text))
+            level = None
+        blocks.append((kind, text, level))
     return _protect_sections(blocks)
 
 
@@ -71,23 +95,33 @@ def _xml_blocks(content):
             return None
     result = []
 
+    def heading_level(element, tag):
+        match = re.fullmatch(r'h([1-6])', tag)
+        if match:
+            return int(match.group(1))
+        for name in ('level', 'depth', 'aria-level', 'data-level'):
+            value = element.attrib.get(name)
+            if value is not None and re.fullmatch(r'[1-6]', value.strip()):
+                return int(value.strip())
+        return None
+
     def visit(element):
         text = ' '.join(''.join(element.itertext()).split())
         tag = element.tag.rsplit('}', 1)[-1].casefold()
         if 'heading' in tag or re.fullmatch(r'h[1-6]', tag):
             if text:
-                result.append(('heading', text))
+                result.append(('heading', text, heading_level(element, tag)))
             return
         if tag in {'p', 'paragraph', 'li'}:
             if text:
-                result.append(('paragraph', text))
+                result.append(('paragraph', text, None))
             return
         children = list(element)
         if children:
             for child in children:
                 visit(child)
         elif text:
-            result.append(('paragraph', text))
+            result.append(('paragraph', text, None))
 
     visit(root)
     return _protect_sections(result)

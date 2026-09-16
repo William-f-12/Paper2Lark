@@ -120,5 +120,86 @@ class TemplateTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, 'ROLE_MAP_INVALID')
 
 
+    def test_human_heading_protects_nested_descendants_until_matching_depth(self):
+        snapshot = snapshot_template({
+            'document_id': 'doc', 'revision_id': 'nested',
+            'content': ('# Summary\nAI summary.\n'
+                        '# Personal Notes (human only)\nParent notes.\n'
+                        '## Questions\nChild questions.\n'
+                        '### Follow-up\nChild details.\n'
+                        '## Sources\nSibling details.\n'
+                        '# Summary\nNew AI summary.')})
+        blocks = snapshot['blocks']
+        by_text = {item['text']: item for item in blocks}
+        for text in ('Personal Notes (human only)', 'Parent notes.',
+                     'Questions', 'Child questions.', 'Follow-up',
+                     'Child details.', 'Sources', 'Sibling details.'):
+            self.assertTrue(by_text[text]['human_only'], text)
+        self.assertFalse(by_text['AI summary.']['human_only'])
+        self.assertFalse(by_text['New AI summary.']['human_only'])
+
+    def test_body_marker_protects_parent_and_nested_sections_but_not_later_sibling(self):
+        snapshot = snapshot_template({
+            'document_id': 'doc', 'revision_id': 'body-marker',
+            'content': ('# Notes\nPlease fill this section manually.\n'
+                        '## Questions\nPrivate question.\n'
+                        '# Results\nAI result.')})
+        by_text = {item['text']: item for item in snapshot['blocks']}
+        for text in ('Notes', 'Please fill this section manually.',
+                     'Questions', 'Private question.'):
+            self.assertTrue(by_text[text]['human_only'], text)
+        self.assertFalse(by_text['Results']['human_only'])
+        self.assertFalse(by_text['AI result.']['human_only'])
+
+    def test_xml_heading_depth_and_ambiguous_depth_are_conservative(self):
+        snapshot = snapshot_template({
+            'document_id': 'doc', 'revision_id': 'xml-depth',
+            'content': ('<doc><h1>Overview</h1><p>AI overview.</p>'
+                        '<h2>个人笔记（人工填写）</h2><p>Parent.</p>'
+                        '<h4>问题</h4><p>Child.</p><h2>Results</h2>'
+                        '<p>AI result.</p></doc>')})
+        by_text = {item['text']: item for item in snapshot['blocks']}
+        for text in ('个人笔记（人工填写）', 'Parent.', '问题', 'Child.'):
+            self.assertTrue(by_text[text]['human_only'], text)
+        self.assertFalse(by_text['Results']['human_only'])
+        self.assertFalse(by_text['AI result.']['human_only'])
+
+        ambiguous = snapshot_template({
+            'document_id': 'doc', 'revision_id': 'xml-ambiguous',
+            'content': ('<doc><heading>个人笔记（人工填写）</heading>'
+                        '<paragraph>Parent.</paragraph><heading>Maybe child</heading>'
+                        '<paragraph>Still private.</paragraph><h1>Could be boundary</h1>'
+                        '<paragraph>Conservative.</paragraph></doc>')})
+        for item in ambiguous['blocks']:
+            if item['text'] in {'个人笔记（人工填写）', 'Parent.', 'Maybe child',
+                                'Still private.', 'Could be boundary', 'Conservative.'}:
+                self.assertTrue(item['human_only'], item['text'])
+
+    def test_role_map_rejects_ai_or_mixed_nested_protected_descendants(self):
+        snapshot = snapshot_template({
+            'document_id': 'doc', 'revision_id': 'nested-roles',
+            'content': ('# Human Notes (human only)\n## Questions\nPrivate.\n'
+                        '# Summary\nWritable.')})
+        human, child, private, summary, summary_body = snapshot['blocks']
+        base = {'schema_version': 1, 'template_digest': snapshot['content_digest'],
+                'template_revision': 'nested-roles', 'roles': []}
+
+        def role(role_id, selectors, ownership):
+            return {'role_id': role_id, 'selectors': selectors, 'heading': role_id,
+                    'ownership': ownership, 'instructions': 'Follow the role.',
+                    'variants': ['research']}
+
+        valid = {**base, 'roles': [
+            role('human', [human['selector'], child['selector'], private['selector']], 'human'),
+            role('summary', [summary['selector']], 'ai'),
+        ]}
+        self.assertEqual(validate_role_map(valid, snapshot), valid)
+        for ownership in ('ai', 'mixed'):
+            bad = {**base, 'roles': [
+                role('protected', [child['selector']], ownership),
+                role('summary', [summary['selector']], 'ai'),
+            ]}
+            with self.subTest(ownership=ownership), self.assertRaises(Paper2LarkError):
+                validate_role_map(bad, snapshot)
 if __name__ == '__main__':
     unittest.main()

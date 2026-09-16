@@ -275,5 +275,30 @@ class ReadSubmissionTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, 'RUN_INVALID')
 
 
+    def test_submission_accepts_ai_writable_sibling_after_nested_human_section(self):
+        template = snapshot_template({
+            'document_id': 'doc-nested', 'revision_id': 'nested-r1',
+            'content': ('# Personal Notes (human only)\n## Questions\nPrivate.\n'
+                        '# Summary\nWritable.')})
+        human, child, private, summary, summary_body = template['blocks']
+
+        def role(role_id, selectors, ownership, variants):
+            return {'role_id': role_id, 'selectors': selectors, 'heading': role_id,
+                    'ownership': ownership, 'instructions': 'Follow the role.',
+                    'variants': variants}
+
+        roles = {'schema_version': 1, 'template_digest': template['content_digest'],
+                 'template_revision': template['revision_id'], 'roles': [
+                     role('human', [human['selector'], child['selector'], private['selector']],
+                          'human', []),
+                     role('summary', [summary['selector']], 'ai', ['research']),
+                 ]}
+        validate_role_map(roles, template)
+        plan = {'schema_version': 1, 'run_id': self.run['run_id'],
+                'template_digest': template['content_digest'],
+                'sections': [{'role_id': 'summary', 'blocks': [
+                    {'kind': 'paragraph', 'text': 'Generated summary.'}]}]}
+        self.assertEqual(validate_note_plan(plan, self.manifest, self.bundle,
+                                            self.analysis, roles), plan)
 if __name__ == '__main__':
     unittest.main()
