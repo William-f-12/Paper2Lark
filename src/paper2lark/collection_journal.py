@@ -22,6 +22,121 @@ _RECORD = re.compile(r"rec[A-Za-z0-9_-]{1,253}\Z")
 _MAX_BYTES = 64 * 1024
 _STATES = ("intended", "created", "verified", "completed")
 
+def _windows_user_sid():
+    """Return the SID of the process token user without invoking a shell."""
+    if os.name != "nt":
+        return None
+    import ctypes
+    from ctypes import wintypes
+    class SID_AND_ATTRIBUTES(ctypes.Structure):
+        _fields_ = [("Sid", wintypes.LPVOID), ("Attributes", wintypes.DWORD)]
+    class TOKEN_USER(ctypes.Structure):
+        _fields_ = [("User", SID_AND_ATTRIBUTES)]
+    token = wintypes.HANDLE()
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    advapi32.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
+    advapi32.OpenProcessToken.restype = wintypes.BOOL
+    advapi32.GetTokenInformation.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPVOID, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+    advapi32.GetTokenInformation.restype = wintypes.BOOL
+    advapi32.ConvertSidToStringSidW.argtypes = [wintypes.LPVOID, ctypes.POINTER(wintypes.LPWSTR)]
+    advapi32.ConvertSidToStringSidW.restype = wintypes.BOOL
+    kernel32.LocalFree.argtypes = [wintypes.LPVOID]
+    kernel32.LocalFree.restype = wintypes.LPVOID
+    if not advapi32.OpenProcessToken(kernel32.GetCurrentProcess(), 8, ctypes.byref(token)):
+        raise OSError(ctypes.get_last_error(), "Cannot inspect the current Windows token.")
+    try:
+        size = wintypes.DWORD()
+        advapi32.GetTokenInformation(token, 1, None, 0, ctypes.byref(size))
+        if ctypes.get_last_error() != 122 or not size.value:
+            raise OSError(ctypes.get_last_error(), "Cannot size the current Windows token.")
+        data = ctypes.create_string_buffer(size.value)
+        if not advapi32.GetTokenInformation(token, 1, data, size, ctypes.byref(size)):
+            raise OSError(ctypes.get_last_error(), "Cannot read the current Windows token.")
+        sid = ctypes.cast(data, ctypes.POINTER(TOKEN_USER)).contents.User.Sid
+        text = wintypes.LPWSTR()
+        if not advapi32.ConvertSidToStringSidW(ctypes.c_void_p(sid), ctypes.byref(text)):
+            raise OSError(ctypes.get_last_error(), "Cannot convert the current Windows SID.")
+        try:
+            return text.value
+        finally:
+            kernel32.LocalFree(text)
+    finally:
+        kernel32.CloseHandle(token)
+
+
+def _windows_dacl_sids(path):
+    """Read the explicit allow ACE SIDs for a path's DACL (testable stdlib helper)."""
+    if os.name != "nt":
+        return set()
+    import ctypes
+    from ctypes import wintypes
+    class ACL_SIZE_INFORMATION(ctypes.Structure):
+        _fields_ = [("AceCount", wintypes.DWORD), ("AclBytesInUse", wintypes.DWORD),
+                    ("AclBytesFree", wintypes.DWORD)]
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    needed = wintypes.DWORD()
+    flags = 4
+    advapi32.GetFileSecurityW(str(path), flags, None, 0, ctypes.byref(needed))
+    if ctypes.get_last_error() != 122 or not needed.value:
+        raise OSError(ctypes.get_last_error(), "Cannot size the Windows journal DACL.")
+    descriptor = ctypes.create_string_buffer(needed.value)
+    if not advapi32.GetFileSecurityW(str(path), flags, descriptor, needed, ctypes.byref(needed)):
+        raise OSError(ctypes.get_last_error(), "Cannot read the Windows journal DACL.")
+    present, defaulted = wintypes.BOOL(), wintypes.BOOL()
+    dacl = wintypes.LPVOID()
+    if not advapi32.GetSecurityDescriptorDacl(descriptor, ctypes.byref(present), ctypes.byref(dacl),
+                                              ctypes.byref(defaulted)) or not present.value or not dacl:
+        raise OSError(ctypes.get_last_error(), "The Windows journal DACL is unavailable.")
+    info = ACL_SIZE_INFORMATION()
+    if not advapi32.GetAclInformation(dacl, ctypes.byref(info), ctypes.sizeof(info), 2):
+        raise OSError(ctypes.get_last_error(), "Cannot inspect the Windows journal DACL.")
+    result = set()
+    for index in range(info.AceCount):
+        ace = wintypes.LPVOID()
+        if not advapi32.GetAce(dacl, index, ctypes.byref(ace)):
+            raise OSError(ctypes.get_last_error(), "Cannot inspect a Windows journal ACE.")
+        raw = ctypes.cast(ace, ctypes.POINTER(ctypes.c_ubyte))
+        if raw[0] != 0:  # ACCESS_ALLOWED_ACE_TYPE; any other ACE fails closed below.
+            result.add("!unexpected-ace")
+            continue
+        sid = ctypes.cast(ctypes.addressof(raw.contents) + 8, wintypes.LPVOID)
+        value = wintypes.LPWSTR()
+        if not advapi32.ConvertSidToStringSidW(sid, ctypes.byref(value)):
+            raise OSError(ctypes.get_last_error(), "Cannot convert a Windows journal ACE SID.")
+        try:
+            result.add(value.value)
+        finally:
+            kernel32.LocalFree(value)
+    return result
+
+
+def _private_windows_dacl(path):
+    if os.name != "nt":
+        return
+    import ctypes
+    from ctypes import wintypes
+    sid = _windows_user_sid()
+    expected = {sid, "S-1-5-18", "S-1-5-32-544"}
+    sddl = "D:P(A;;FA;;;{})(A;;FA;;;SY)(A;;FA;;;BA)".format(sid)
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    descriptor = wintypes.LPVOID()
+    if not advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, 1,
+                                                                           ctypes.byref(descriptor), None):
+        raise OSError(ctypes.get_last_error(), "Cannot construct the private Windows journal DACL.")
+    try:
+        # DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION.
+        if not advapi32.SetFileSecurityW(str(path), 4 | 0x80000000, descriptor):
+            raise OSError(ctypes.get_last_error(), "Cannot set the private Windows journal DACL.")
+    finally:
+        kernel32.LocalFree(descriptor)
+    if _windows_dacl_sids(path) != expected:
+        raise OSError("The Windows journal DACL retained inherited access.")
+
 
 def _error(code, message):
     raise Paper2LarkError(code, message)
@@ -101,6 +216,7 @@ def _write(path, value):
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     try:
         os.chmod(path.parent, 0o700)
+        _private_windows_dacl(path.parent)
         fd, temporary = tempfile.mkstemp(prefix=".intent-", suffix=".tmp", dir=path.parent)
         try:
             os.fchmod(fd, 0o600)
@@ -110,6 +226,7 @@ def _write(path, value):
                 os.fsync(stream.fileno())
             os.replace(temporary, path)
             os.chmod(path, 0o600)
+            _private_windows_dacl(path)
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)

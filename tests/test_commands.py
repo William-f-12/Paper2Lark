@@ -158,6 +158,8 @@ if operation == ('base', '+record-batch-create'):
     row.update({names[field_id]: value for field_id, value in values.items()})
     state['rows'].append(row)
     state.setdefault('writes', []).append({'operation': 'create', 'payload': payload})
+    if state.get('commit_then_fail_create'):
+        save(); print('uncertain provider result'); raise SystemExit(3)
     envelope({'record_id_list': [row['record_id']]})
 
 if operation == ('base', '+record-batch-update'):
@@ -343,7 +345,7 @@ class CommandTests(unittest.TestCase):
     def test_add_preview_is_read_only_and_metacharacters_remain_data(self):
         with tempfile.TemporaryDirectory(prefix='命令 preview ') as folder:
             scenario = Scenario(folder)
-            secret = 'PRIVATE_PAPER_TEXT_7ca15; $(whoami) `never-run`'
+            secret = 'PRIVATE_PAPER_TEXT_7ca15; $(whoami) \never-run`'
             request = scenario.request('paper request.json', self.add_request(secret))
             before_binding = (scenario.home / 'profiles/personal/bindings.json').read_bytes()
             before_entries = {str(path.relative_to(scenario.home))
@@ -477,6 +479,26 @@ class CommandTests(unittest.TestCase):
             self.assertEqual(len(calls), 1)
             self.assertEqual(scenario.provider()['write_attempts'], 1)
 
+    def test_adopt_record_requires_apply_and_forwards_exact_record(self):
+        with tempfile.TemporaryDirectory(prefix='命令 adopt ') as folder:
+            scenario = Scenario(folder)
+            request = scenario.request('paper.json', self.add_request())
+            result, data = self.invoke(scenario, 'papers', 'add', '--input', str(request),
+                                       '--adopt-record', 'recSynthetic1')
+            self.assertEqual(result.returncode, 2)
+            self.assertEqual(data['error']['code'], 'USAGE')
+            self.init_state(scenario)
+            scenario.write_provider(commit_then_fail_create=True)
+            result, data = self.invoke(scenario, 'papers', 'add', '--input', str(request), '--apply')
+            self.assertEqual(result.returncode, 2)
+            self.assertEqual(data['error']['code'], 'REMOTE_RESULT_UNCERTAIN')
+            self.assertEqual(scenario.provider()['rows'][0]['record_id'], 'recSynthetic1')
+            result, data = self.invoke(scenario, 'papers', 'add', '--input', str(request), '--apply',
+                                       '--adopt-record', 'recSynthetic1')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(data['data']['record_id'], 'recSynthetic1')
+            creates = [item for item in scenario.provider()['writes'] if item['operation'] == 'create']
+            self.assertEqual(len(creates), 1)
     def test_bad_input_is_bounded_strict_and_sanitized_before_provider(self):
         with tempfile.TemporaryDirectory(prefix='命令 invalid ') as folder:
             scenario = Scenario(folder)

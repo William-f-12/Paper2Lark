@@ -3,11 +3,14 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from paper2lark import state
+from paper2lark import papers as papers_module
+from paper2lark.collection_journal import find_pending
 from paper2lark.bindings import digest, library_id, map_fields
 from paper2lark.config import DEFAULTS
 from paper2lark.errors import Paper2LarkError
@@ -765,15 +768,21 @@ class CollectionTests(PaperServiceCase):
         self.init_state()
         request = self.add({"kind": "doi", "value": "10.1000/journal-timeout"}, title="Original")
         gateway = MemoryGateway(self.binding)
-        gateway.create_hook = lambda gw, fields: (_ for _ in ()).throw(
-            Paper2LarkError("REMOTE_RESULT_UNCERTAIN", "result lost after commit"))
+        def commit_then_lose_response(gw, fields):
+            gw.records["recCommitted"] = record("recCommitted", **fields)
+            raise Paper2LarkError("REMOTE_RESULT_UNCERTAIN", "result lost after commit")
+        gateway.create_hook = commit_then_lose_response
         self.assert_error("REMOTE_RESULT_UNCERTAIN", lambda: collect_paper(
             self.home, self.binding, self.settings, request, gateway, apply=True))
+        self.assertIn("recCommitted", gateway.records)
         changed = copy.deepcopy(request)
         changed["metadata"]["title"] = "Edited metadata cannot create again"
         self.assert_error("COLLECTION_RESULT_UNCERTAIN", lambda: collect_paper(
             self.home, self.binding, self.settings, changed, gateway, apply=True))
         self.assertEqual(gateway.counts["create"], 1)
+        adopted = collect_paper(self.home, self.binding, self.settings, request, gateway,
+                                apply=True, adopt_record="recCommitted")
+        self.assertEqual(adopted["record_id"], "recCommitted")
 
     def test_known_journal_id_reconciles_without_a_second_create(self):
         self.init_state()
@@ -814,6 +823,54 @@ class CollectionTests(PaperServiceCase):
         self.assertEqual(result["record_id"], "recAdopt")
         self.assertEqual(gateway.counts["create"], 1)
 
+    def test_interruption_after_intent_before_dispatch_blocks_retry(self):
+        self.init_state()
+        request = self.add({"kind": "doi", "value": "10.1000/intent-boundary"})
+        gateway = MemoryGateway(self.binding)
+        original = papers_module.begin_intent
+        def stop_after_intent(*args):
+            original(*args)
+            raise KeyboardInterrupt("stop after durable intent")
+        with mock.patch.object(papers_module, "begin_intent", side_effect=stop_after_intent):
+            with self.assertRaises(KeyboardInterrupt):
+                collect_paper(self.home, self.binding, self.settings, request, gateway, apply=True)
+        pending = find_pending(self.home, self.binding["library_id"], request["source"]["aliases"])
+        self.assertEqual(pending["state"], "intended")
+        self.assertEqual(gateway.counts["create"], 0)
+        self.assert_error("COLLECTION_RESULT_UNCERTAIN", lambda: collect_paper(
+            self.home, self.binding, self.settings, request, gateway, apply=True))
+
+    def test_interruption_after_returned_id_requires_adoption(self):
+        self.init_state()
+        request = self.add({"kind": "doi", "value": "10.1000/id-boundary"})
+        gateway = MemoryGateway(self.binding)
+        with mock.patch.object(papers_module, "record_created", side_effect=KeyboardInterrupt("lost before ID journal")):
+            with self.assertRaises(KeyboardInterrupt):
+                collect_paper(self.home, self.binding, self.settings, request, gateway, apply=True)
+        pending = find_pending(self.home, self.binding["library_id"], request["source"]["aliases"])
+        self.assertEqual(pending["state"], "intended")
+        self.assertIn("recCreated1", gateway.records)
+        self.assert_error("COLLECTION_RESULT_UNCERTAIN", lambda: collect_paper(
+            self.home, self.binding, self.settings, request, gateway, apply=True))
+        adopted = collect_paper(self.home, self.binding, self.settings, request, gateway,
+                                apply=True, adopt_record="recCreated1")
+        self.assertEqual(adopted["record_id"], "recCreated1")
+        self.assertEqual(gateway.counts["create"], 1)
+
+    def test_interruption_after_sync_reconciles_and_finishes_without_create(self):
+        self.init_state()
+        request = self.add({"kind": "doi", "value": "10.1000/sync-boundary"})
+        gateway = MemoryGateway(self.binding)
+        with mock.patch.object(papers_module, "finish_intent", side_effect=KeyboardInterrupt("stop after sync")):
+            with self.assertRaises(KeyboardInterrupt):
+                collect_paper(self.home, self.binding, self.settings, request, gateway, apply=True)
+        pending = find_pending(self.home, self.binding["library_id"], request["source"]["aliases"])
+        self.assertEqual(pending["state"], "verified")
+        self.assertIsNotNone(state.find_paper(self.home, self.binding["library_id"], request["source"]["aliases"]))
+        result = collect_paper(self.home, self.binding, self.settings, request, gateway, apply=True)
+        self.assertEqual(result["record_id"], "recCreated1")
+        self.assertEqual(gateway.counts["create"], 1)
+        self.assertIsNone(find_pending(self.home, self.binding["library_id"], request["source"]["aliases"]))
 class QueryTests(PaperServiceCase):
     def test_query_filters_intersect_truncate_and_return_canonical_vocabulary(self):
         rows = [

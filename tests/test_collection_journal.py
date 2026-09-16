@@ -9,7 +9,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from paper2lark.errors import Paper2LarkError
-from paper2lark.collection_journal import begin_intent, find_pending, record_created, verify_intent, finish_intent
+from paper2lark.collection_journal import (begin_intent, find_pending, record_created, verify_intent,
+                                           finish_intent, _windows_dacl_sids, _windows_user_sid)
 
 
 LIBRARY = "a" * 32
@@ -49,6 +50,14 @@ class CollectionJournalTests(unittest.TestCase):
         self.assertNotIn("base", path.read_text(encoding="utf-8"))
         self.assertEqual(find_pending(self.home, LIBRARY, ["url:https://doi.org/10.1000/journal"])["operation_id"], intent["operation_id"])
 
+    @unittest.skipUnless(os.name == "nt", "Windows ACL coverage")
+    def test_windows_journal_dacl_excludes_inherited_user_access(self):
+        intent = begin_intent(self.home, self.binding, self.identity, self.fields)
+        root = self.home / "collections" / LIBRARY
+        artifact = root / (intent["operation_id"] + ".json")
+        allowed = {_windows_user_sid(), "S-1-5-18", "S-1-5-32-544"}
+        self.assertEqual(_windows_dacl_sids(root), allowed)
+        self.assertEqual(_windows_dacl_sids(artifact), allowed)
     def test_created_id_is_durable_before_verification_and_completion_is_idempotent(self):
         intent = begin_intent(self.home, self.binding, self.identity, self.fields)
         created = record_created(self.home, intent, "recJournal")
