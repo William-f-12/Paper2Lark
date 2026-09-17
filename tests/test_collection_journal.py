@@ -76,6 +76,13 @@ class CollectionJournalTests(unittest.TestCase):
                 _private_windows_dacl(artifact)
                 self.assertEqual(_windows_dacl_sids(artifact), allowed)
 
+    @unittest.skipUnless(os.name == "nt", "Windows ACL coverage")
+    def test_windows_journal_does_not_require_posix_fchmod(self):
+        with mock.patch('paper2lark.collection_journal.os.fchmod', create=True) as chmod:
+            intent = begin_intent(self.home, self.binding, self.identity, self.fields)
+            chmod.assert_not_called()
+        self.assertEqual(find_pending(self.home, LIBRARY, self.identity["aliases"]), intent)
+
     def test_created_id_is_durable_before_verification_and_completion_is_idempotent(self):
         intent = begin_intent(self.home, self.binding, self.identity, self.fields)
         created = record_created(self.home, intent, "recJournal")

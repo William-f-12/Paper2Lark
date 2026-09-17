@@ -282,8 +282,11 @@ def _write(path, value):
         _private_windows_dacl(path.parent)
         fd, temporary = tempfile.mkstemp(prefix=".intent-", suffix=".tmp", dir=path.parent)
         try:
-            os.fchmod(fd, 0o600)
             with os.fdopen(fd, "wb") as stream:
+                # Windows uses the restricted parent DACL and final file DACL.
+                # fchmod is unavailable on Windows before Python 3.13.
+                if os.name != "nt":
+                    os.fchmod(stream.fileno(), 0o600)
                 stream.write(encoded)
                 stream.flush()
                 os.fsync(stream.fileno())
