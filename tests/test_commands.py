@@ -350,6 +350,43 @@ class CommandTests(unittest.TestCase):
             self.assertEqual(result.stderr, '')
             self.assertEqual(scenario.provider()['calls'], [])
 
+    def test_corrupt_collection_journal_is_one_structured_error_before_provider_call(self):
+        with tempfile.TemporaryDirectory(prefix='command corrupt journal ') as folder:
+            scenario = Scenario(folder)
+            self.init_state(scenario)
+            request = scenario.request('paper.json', self.add_request())
+            library_id = plugin_binding()['library_id']
+            root = scenario.home / 'collections' / library_id
+            root.mkdir(parents=True)
+            artifact = root / '00000000-0000-0000-0000-000000000001.json'
+            payload = {
+                'schema_version': 1,
+                'operation_id': '00000000-0000-0000-0000-000000000001',
+                'library_id': [],
+                'account_digest': '0' * 64,
+                'binding_digest': '0' * 64,
+                'aliases': ['doi:10.1000/command'],
+                'source_fingerprint': None,
+                'fields': {'title': 'Frozen title'},
+                'request_digest': '0' * 64,
+                'state': 'intended',
+                'record_id': None,
+            }
+            artifact.write_text(json.dumps(payload), encoding='utf-8')
+
+            result, data = self.invoke(
+                scenario, 'papers', 'add', '--input', str(request), '--apply')
+
+            self.assertEqual(result.returncode, 2)
+            self.assertEqual(data, {'ok': False, 'error': {
+                'code': 'COLLECTION_JOURNAL_INVALID',
+                'message': 'The collection journal artifact is malformed.',
+            }})
+            self.assertNotIn('Traceback', result.stdout + result.stderr)
+            self.assertEqual(result.stderr, '')
+            self.assertEqual(scenario.provider()['calls'], [])
+            self.assertEqual(json.loads(artifact.read_text(encoding='utf-8')), payload)
+
     def test_existing_m1_commands_remain_available(self):
         with tempfile.TemporaryDirectory(prefix='配置 commands ') as folder:
             scenario = Scenario(folder)

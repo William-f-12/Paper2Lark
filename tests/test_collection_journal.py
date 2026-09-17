@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from paper2lark.errors import Paper2LarkError
 from paper2lark.collection_journal import (begin_intent, find_pending, record_created, verify_intent,
                                            finish_intent, _windows_dacl_sids, _windows_owner_sid, _windows_user_sid,
-                                           _private_windows_dacl)
+                                           _private_windows_dacl, _validate)
 
 
 LIBRARY = "a" * 32
@@ -89,3 +89,22 @@ class CollectionJournalTests(unittest.TestCase):
             begin_intent(self.home, self.binding, self.identity, {"title": "Different"})
         self.assertEqual(raised.exception.code, "COLLECTION_RESULT_UNCERTAIN")
         self.assertEqual(find_pending(self.home, LIBRARY, self.identity["aliases"])["operation_id"], first["operation_id"])
+
+    def test_wrong_type_library_identity_is_always_a_structured_journal_error(self):
+        intent = begin_intent(self.home, self.binding, self.identity, self.fields)
+        path = self.home / "collections" / LIBRARY / (intent["operation_id"] + ".json")
+        original = json.loads(path.read_text(encoding="utf-8"))
+        for wrong in (None, [], {}, 7):
+            with self.subTest(value=wrong):
+                corrupted = copy.deepcopy(original)
+                corrupted["library_id"] = wrong
+                with self.assertRaises(Paper2LarkError) as raised:
+                    _validate(corrupted)
+                self.assertEqual(raised.exception.code, "COLLECTION_JOURNAL_INVALID")
+
+        corrupted = copy.deepcopy(original)
+        corrupted["library_id"] = []
+        path.write_text(json.dumps(corrupted), encoding="utf-8")
+        with self.assertRaises(Paper2LarkError) as raised:
+            find_pending(self.home, LIBRARY, self.identity["aliases"])
+        self.assertEqual(raised.exception.code, "COLLECTION_JOURNAL_INVALID")

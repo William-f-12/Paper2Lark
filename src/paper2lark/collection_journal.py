@@ -247,7 +247,9 @@ def _validate(value):
             "aliases", "source_fingerprint", "fields", "request_digest", "state", "record_id"}:
         _error("COLLECTION_JOURNAL_INVALID", "The collection journal artifact is malformed.")
     if (value["schema_version"] != 1 or not isinstance(value["operation_id"], str)
-            or _OPERATION.fullmatch(value["operation_id"]) is None or _LIBRARY.fullmatch(value["library_id"]) is None
+            or _OPERATION.fullmatch(value["operation_id"]) is None
+            or not isinstance(value["library_id"], str)
+            or _LIBRARY.fullmatch(value["library_id"]) is None
             or any(not isinstance(value[key], str) or re.fullmatch(r"[0-9a-f]{64}", value[key]) is None
                    for key in ("account_digest", "binding_digest", "request_digest"))
             or value["state"] not in _STATES):

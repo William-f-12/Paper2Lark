@@ -460,17 +460,23 @@ def collect_paper(home, binding, settings, request, gateway, apply=False, adopt_
     home = Path(home)
     if adopt_record is not None and not apply:
         _error("USAGE", "--adopt-record requires --apply.")
-    preview = _collection_plan(home, binding, settings, request, _snapshot(gateway), consult_local=not apply)
     if not apply:
+        preview = _collection_plan(
+            home, binding, settings, request, _snapshot(gateway), consult_local=True)
         return copy.deepcopy(preview["public"])
+    aliases = _candidate_aliases(request["source"])
+    # Fail closed on existing recovery evidence before the provider preflight.
+    find_pending(home, binding["library_id"], aliases)
+    _collection_plan(
+        home, binding, settings, request, _snapshot(gateway), consult_local=False)
     if not (home / "state.sqlite3").exists():
         _require_v2(home)
     with library_lock(home, binding["library_id"]):
         _require_v2(home)
+        pending = find_pending(home, binding["library_id"], aliases)
         replan = lambda snapshot: _collection_plan(home, binding, settings, request, snapshot)
-        # Snapshot first verifies the bound account/table for both ordinary retries and adoption.
+        # Validate private recovery evidence before contacting the bound provider.
         plan = replan(_snapshot(gateway))
-        pending = find_pending(home, binding["library_id"], _candidate_aliases(request["source"]))
         if pending is not None:
             if pending["account_digest"] != digest(binding["account"]) or pending["binding_digest"] != digest(binding):
                 _collection_uncertain(pending, "The matching collection operation belongs to a different binding.")

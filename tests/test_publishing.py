@@ -479,6 +479,113 @@ class PublicationTests(unittest.TestCase):
         self.assertIsNone(state.get_active_run(
             self.home, self.binding['library_id'], interrupted['paper_uid']))
 
+    def test_retry_adopts_stranded_result_with_legacy_verified_note_receipt(self):
+        run_id, plan, run_dir, interrupted = self.strand_publication_result(
+            lambda: self.gateway.record['fields'].update(reading_status=['Paused']))
+        result_path = run_dir / 'publication-result.json'
+        result_bytes = result_path.read_bytes()
+        operation = state.get_operation(self.home, run_id, 1)
+        compact = operation['response']
+        legacy = {
+            'document_id': compact['document_id'],
+            'node_token': compact['node_token'],
+            'revision_id': compact['revision_id'],
+            'content_sha256': compact['content_sha256'],
+            'note_url': compact['note_url'],
+            'content': self.documents.documents[compact['document_id']]['content'],
+            'title': plan['title'],
+            'url': 'https://example.test/docx/' + compact['document_id'],
+        }
+        def store_response(response):
+            conn = sqlite3.connect(self.home / 'state.sqlite3')
+            try:
+                conn.execute(
+                    'UPDATE operations SET response_snapshot=? WHERE operation_id=?',
+                    (json.dumps(response), operation['operation_id']))
+                conn.commit()
+            finally:
+                conn.close()
+
+        tampered = {**legacy, 'content': legacy['content'] + 'tampered'}
+        store_response(tampered)
+        create_calls = self.documents.create_calls
+        update_calls = self.gateway.update_calls
+        with self.assertRaises(Paper2LarkError) as raised:
+            self.apply(run_id, plan)
+        self.assertEqual(raised.exception.code, 'RUN_INVALID')
+        self.assertEqual(result_path.read_bytes(), result_bytes)
+        self.assertEqual(self.documents.create_calls, create_calls)
+        self.assertEqual(self.gateway.update_calls, update_calls)
+        self.assertEqual(state.get_active_run(
+            self.home, self.binding['library_id'], interrupted['paper_uid'])['run_id'], run_id)
+
+        store_response(legacy)
+        self.gateway.record['fields']['keywords'] = ['AI Agents']
+        result = self.apply(run_id, plan)
+
+        self.assertEqual(result['warnings'], ['STATUS_CHANGED'])
+        self.assertFalse(result['remote_mutations'])
+        self.assertEqual(result_path.read_bytes(), result_bytes)
+        self.assertEqual(state.get_operation(self.home, run_id, 1)['response'], legacy)
+        self.assertEqual(self.documents.create_calls, create_calls)
+        self.assertEqual(self.gateway.update_calls, update_calls)
+        self.assertIsNone(state.get_active_run(
+            self.home, self.binding['library_id'], interrupted['paper_uid']))
+
+    def test_stranded_result_reads_malformed_and_oversized_files_with_one_bounded_request(self):
+        run_id, plan, run_dir, interrupted = self.strand_publication_result()
+        result_path = run_dir / 'publication-result.json'
+        limit = 4 * 1024 * 1024
+        original_open = Path.open
+        create_calls = self.documents.create_calls
+        update_calls = self.gateway.update_calls
+
+        class ReadRecorder:
+            def __init__(self, stream, requests):
+                self.stream = stream
+                self.requests = requests
+
+            def __enter__(self):
+                self.stream.__enter__()
+                return self
+
+            def __exit__(self, *args):
+                return self.stream.__exit__(*args)
+
+            def read(self, size=-1):
+                self.requests.append(size)
+                return self.stream.read(size)
+
+            def __getattr__(self, name):
+                return getattr(self.stream, name)
+
+        for label, payload in (
+                ('malformed', b'{'),
+                ('oversized', b'{' + b' ' * limit)):
+            with self.subTest(label=label):
+                result_path.write_bytes(payload)
+                requests = []
+
+                def tracking_open(path, *args, **kwargs):
+                    stream = original_open(path, *args, **kwargs)
+                    mode = args[0] if args else kwargs.get('mode', 'r')
+                    if Path(path) == result_path and mode == 'rb':
+                        return ReadRecorder(stream, requests)
+                    return stream
+
+                with patch.object(Path, 'open', new=tracking_open):
+                    with self.assertRaises(Paper2LarkError) as raised:
+                        self.apply(run_id, plan)
+
+                self.assertEqual(raised.exception.code, 'RUN_INVALID')
+                self.assertEqual(requests, [limit + 1])
+                self.assertEqual(result_path.read_bytes(), payload)
+                self.assertEqual(self.documents.create_calls, create_calls)
+                self.assertEqual(self.gateway.update_calls, update_calls)
+                self.assertEqual(state.get_active_run(
+                    self.home, self.binding['library_id'], interrupted['paper_uid'])['run_id'],
+                    run_id)
+
     def test_stranded_result_rejects_malformed_duplicate_and_mismatched_fields(self):
         run_id, plan, run_dir, interrupted = self.strand_publication_result()
         result_path = run_dir / 'publication-result.json'

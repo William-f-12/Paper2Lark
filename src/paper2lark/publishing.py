@@ -35,17 +35,32 @@ def _sha(value):
     return hashlib.sha256(_canonical(value)).hexdigest()
 
 
-def _read_json(path):
+MAX_ARTIFACT_BYTES = 4 * 1024 * 1024
+
+
+def _bounded_bytes(path, limit=MAX_ARTIFACT_BYTES):
     try:
-        raw = Path(path).read_bytes()
-        if len(raw) > 4 * 1024 * 1024:
-            raise ValueError
+        with Path(path).open('rb') as stream:
+            raw = stream.read(limit + 1)
+    except OSError:
+        _error('RUN_INVALID', 'A required publication artifact is unreadable.')
+    if not raw or len(raw) > limit:
+        _error('RUN_INVALID', 'A required publication artifact has an invalid size.')
+    return raw
+
+
+def _json_object(raw):
+    try:
         value = strict_json_loads(raw.decode('utf-8', errors='strict'))
-    except (OSError, UnicodeError, ValueError, RecursionError):
+    except (UnicodeError, ValueError, RecursionError):
         _error('RUN_INVALID', 'A required publication artifact is unreadable.')
     if not isinstance(value, dict):
         _error('RUN_INVALID', 'A required publication artifact is malformed.')
     return value
+
+
+def _read_json(path):
+    return _json_object(_bounded_bytes(path))
 
 
 def _artifact(run_dir, run, key):
@@ -159,15 +174,13 @@ def _plan_public(plan, run_dir):
             'mutations': copy.deepcopy(plan['mutations']), 'remote_mutations': False}
 
 
-def _file_artifact(path, limit=4 * 1024 * 1024):
-    try:
-        raw = path.read_bytes()
-    except OSError:
-        _error('RUN_INVALID', 'A stranded publication artifact is unreadable.')
-    if not raw or len(raw) > limit:
-        _error('RUN_INVALID', 'A stranded publication artifact has an invalid size.')
+def _artifact_descriptor(path, raw):
     return {'path': str(path), 'sha256': hashlib.sha256(raw).hexdigest(),
             'size_bytes': len(raw)}
+
+
+def _file_artifact(path, limit=MAX_ARTIFACT_BYTES):
+    return _artifact_descriptor(path, _bounded_bytes(path, limit))
 
 
 def _adopt_stranded_plan(home, binding, run_id, run_dir, run):
@@ -513,7 +526,49 @@ def _stranded_result_artifact(run_dir):
             raise OSError
     except (OSError, RuntimeError):
         _error('RUN_INVALID', 'A stranded publication result has an unsafe path.')
-    return _read_json(path), _file_artifact(path)
+    raw = _bounded_bytes(path)
+    return _json_object(raw), _artifact_descriptor(path, raw)
+
+
+def _completion_note_receipt(binding, response, expected_content_sha256, expected_title):
+    required = {'document_id', 'node_token', 'revision_id', 'content_sha256', 'note_url'}
+    allowed = required | {'content', 'title', 'url'}
+    extras = set(response) - required if isinstance(response, dict) else set()
+    if (not isinstance(response, dict) or not required.issubset(response)
+            or set(response) - allowed or (extras and 'content' not in extras)
+            or not isinstance(response.get('document_id'), str)
+            or not response['document_id']
+            or not isinstance(response.get('node_token'), str)
+            or not response['node_token']
+            or type(response.get('revision_id')) is not int
+            or response['revision_id'] < 0
+            or response.get('content_sha256') != expected_content_sha256):
+        _error('RUN_INVALID', 'The stranded publication note receipt does not match the plan.')
+    content = response.get('content')
+    if 'content' in response and (not isinstance(content, str)
+                                  or hashlib.sha256(content.encode('utf-8')).hexdigest()
+                                  != expected_content_sha256):
+        _error('RUN_INVALID', 'The stranded publication note receipt does not match the plan.')
+    if 'title' in response and response['title'] != expected_title:
+        _error('RUN_INVALID', 'The stranded publication note receipt does not match the plan.')
+    if 'url' in response:
+        raw_url = response['url']
+        try:
+            parsed = urlsplit(raw_url) if isinstance(raw_url, str) else None
+            valid_url = (parsed is not None and parsed.scheme in {'http', 'https'}
+                         and parsed.netloc and not parsed.username and not parsed.password)
+        except ValueError:
+            valid_url = False
+        if not valid_url:
+            _error('RUN_INVALID', 'The stranded publication note receipt does not match the plan.')
+    note_url = _wiki_url(binding, response['node_token'], response.get('url'))
+    if response['note_url'] != note_url:
+        _error('RUN_INVALID', 'The stranded publication note receipt does not match the plan.')
+    return {'document_id': response['document_id'],
+            'node_token': response['node_token'],
+            'revision_id': response['revision_id'],
+            'content_sha256': response['content_sha256'],
+            'note_url': note_url}
 
 
 def _verified_completion_operations(home, binding, run_id, plan):
@@ -529,15 +584,9 @@ def _verified_completion_operations(home, binding, run_id, plan):
                 note_operation['request_digest'], note_operation['before'],
                 note_operation['desired']) != expected_note):
         _error('RUN_INVALID', 'The stranded publication result has no matching verified note operation.')
-    note = _note_from_operation(binding, note_operation)
-    response = note_operation.get('response')
-    receipt_keys = {'document_id', 'node_token', 'revision_id', 'content_sha256', 'note_url'}
-    if (set(response) != receipt_keys
-            or not note['document_id'] or not note['node_token']
-            or note['revision_id'] < 0
-            or note_operation.get('remote_id') != note['document_id']
-            or response.get('content_sha256') != plan['publication_sha256']
-            or response.get('note_url') != note['note_url']):
+    note = _completion_note_receipt(
+        binding, note_operation.get('response'), plan['publication_sha256'], plan['title'])
+    if note_operation.get('remote_id') != note['document_id']:
         _error('RUN_INVALID', 'The stranded publication note receipt does not match the plan.')
 
     desired = {**plan['desired_record'], 'note_url': note['note_url']}
