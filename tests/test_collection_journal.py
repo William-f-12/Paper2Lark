@@ -60,11 +60,22 @@ class CollectionJournalTests(unittest.TestCase):
         allowed = {_windows_user_sid(), "S-1-5-18", "S-1-5-32-544"}
         self.assertEqual(_windows_dacl_sids(root), allowed)
         self.assertEqual(_windows_dacl_sids(artifact), allowed)
-        self.assertEqual(_windows_owner_sid(root), _windows_user_sid())
-        self.assertEqual(_windows_owner_sid(artifact), _windows_user_sid())
+        self.assertIn(_windows_owner_sid(root), allowed)
+        self.assertIn(_windows_owner_sid(artifact), allowed)
         with mock.patch('paper2lark.collection_journal._windows_owner_sid', return_value='S-1-5-21-untrusted'):
             with self.assertRaises(OSError):
                 _private_windows_dacl(artifact)
+    @unittest.skipUnless(os.name == "nt", "Windows ACL coverage")
+    def test_windows_trusted_system_owners_keep_the_restricted_dacl(self):
+        artifact = Path(self.folder.name) / 'owner-test.json'
+        artifact.write_text('{}', encoding='utf-8')
+        allowed = {_windows_user_sid(), 'S-1-5-18', 'S-1-5-32-544'}
+        for owner in allowed:
+            with self.subTest(owner=owner), mock.patch(
+                    'paper2lark.collection_journal._windows_owner_sid', return_value=owner):
+                _private_windows_dacl(artifact)
+                self.assertEqual(_windows_dacl_sids(artifact), allowed)
+
     def test_created_id_is_durable_before_verification_and_completion_is_idempotent(self):
         intent = begin_intent(self.home, self.binding, self.identity, self.fields)
         created = record_created(self.home, intent, "recJournal")

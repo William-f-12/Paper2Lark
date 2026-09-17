@@ -193,8 +193,10 @@ def _private_windows_dacl(path):
         kernel32.LocalFree(descriptor)
     if _windows_dacl_sids(path) != expected:
         raise OSError("The Windows journal DACL retained inherited access.")
-    if _windows_owner_sid(path) != sid:
-        raise OSError("The Windows journal owner differs from the current process user.")
+    # Elevated Windows tokens can create objects owned by Administrators.
+    # These principals already have full control in the verified DACL above.
+    if _windows_owner_sid(path) not in expected:
+        raise OSError("The Windows journal owner is not a trusted DACL principal.")
 
 
 def _error(code, message):

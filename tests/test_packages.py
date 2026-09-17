@@ -38,7 +38,7 @@ class PackageTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 data = json.loads(result.stdout)
                 self.assertTrue(data['ok'])
-                self.assertEqual(data['data']['home'], str(base / 'shared state'))
+                self.assertEqual(data['data']['home'], str((base / 'shared state').resolve()))
                 results.append(data['data']['runtime_sha256'])
             self.assertEqual(results[0], results[1])
             self.assertFalse((base / 'shared state').exists())
